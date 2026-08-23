@@ -30,7 +30,7 @@ def retrieve(query: str, model, chunks, embeds, top_k=2):
     return top_chunks
 top_chunks = ["片段A","片段B"]
 context="\n\n".join(top_chunks)
-def build_prompt_simple(context:str, query:str):->list:
+def build_prompt_simple(context:str, query:str)->str:
     prompt_template = """请严格依据下面的参考资料回答用户的问题，如果参考资料没有相关信息就如实说明不知道，不要编造内容。
     参考资料：
     {context}
