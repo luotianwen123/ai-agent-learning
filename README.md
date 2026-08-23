@@ -19,7 +19,7 @@ AI Agent、RAG学习练习项目，手写Demo
 （这里留给你后续慢慢填：huggingface网络镜像、全局变量警告、join空列表得到空字符串等）
 
 ## 依赖包
-sentence‑transformers
-numpy
+sentence‑transformers>=2.7.0
+numpy>=1.26.0
 tiktoken
 requests
