@@ -39,6 +39,6 @@ def build_prompt_simple(context:str, query:str)->str:
     
     # query是用户原始提问字符串
     final_prompt = prompt_template.format(context=context, query=query)
-
+    return final_prompt
 res = retrieve("什么是RAG", model, chunks, embeds, top_k=2)
 print(res)
