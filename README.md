@@ -16,7 +16,7 @@ AI Agent、RAG学习练习项目，手写Demo
 2. top‑k参数越界保护
 
 ## 踩坑记录
-（这里留给你后续慢慢填：huggingface网络镜像、全局变量警告、join空列表得到空字符串等）
+（这里后续慢慢填：huggingface网络镜像、全局变量警告、join空列表得到空字符串等）
 
 ## 依赖包
 sentence‑transformers>=2.7.0
