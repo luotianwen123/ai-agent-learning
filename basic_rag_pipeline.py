@@ -2,6 +2,7 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from dataclasses import dataclass
 import tiktoken
+import requests
 
 @dataclass
 class ChunkItem:
@@ -11,7 +12,7 @@ class ChunkItem:
 def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
     separators = ["\n\n", "。", "\n"]
 
-    # 递归终止条件
+    
     if len(text) <= max_chunk_size:
         return [text]
 
@@ -34,7 +35,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
             found_split = True
             break
 
-    # 兜底硬切
+    
     if not found_split:
         i = 0
         while i < len(text):
@@ -42,7 +43,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
             all_chunks.append(chunk)
             i += max_chunk_size
 
-    # 缓冲区合并
+   
     buffer = []
     buffer_len = 0
     merged_chunks = []
@@ -59,7 +60,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
 
-    # 后置overlap重叠
+   
     final_chunks = []
     for i in range(len(merged_chunks)):
         current = merged_chunks[i]
@@ -77,6 +78,9 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     dot = np.dot(a, b)
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
+    
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
     return float(dot / (norm_a * norm_b))
 
 def retrieve(query: str, model, vector_store: list[ChunkItem], top_k=2):
@@ -111,6 +115,7 @@ def calc_available_chunk_quota(model_max_window: int,
     if available_chunk_token <= 0:
         return 0
     return available_chunk_token
+
 def clip_context_by_max_token(chunk_list, token_limit, tokenizer):
     total_tokens = 0
     keep_chunks = []
@@ -122,6 +127,7 @@ def clip_context_by_max_token(chunk_list, token_limit, tokenizer):
         keep_chunks.append(one_chunk)
     safe_context = "\n".join(keep_chunks)
     return safe_context
+
 def build_rag_prompt(system_prompt: str,
                      safe_context: str,
                      user_query: str) -> str:
@@ -137,13 +143,46 @@ def build_rag_prompt(system_prompt: str,
     full_prompt = "\n".join(parts)
     return full_prompt
 
+def llm_chat(
+    bearer_key: str,
+    model_name: str,
+    prompt_text: str,
+    max_output_tokens:int = 512
+) -> str:
+    url = "填入你的接口地址"
+    headers = {
+        "Authorization": f"Bearer {bearer_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role":"user", "content": prompt_text}
+        ],
+        "max_tokens": max_output_tokens
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if resp.status_code == 429:
+            raise RuntimeError("接口429限流：请求过于频繁")
+        if resp.status_code != 200:
+            raise RuntimeError(f"接口请求失败，status_code:{resp.status_code}, {resp.text}")
+
+        resp_json = resp.json()
+        result_text = resp_json["choices"][0]["message"]["content"]
+        return result_text
+
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"网络请求异常：{str(e)}")
 
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。
 RAG检索增强生成，通过知识库检索，给大模型补充外部资料，减少幻觉。
 文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息；分块过小丢失完整语义。"""
 
 if __name__ == "__main__":
-    model = SentenceTransformer("all‑MiniLM‑L6‑v2")
+    
+    model = SentenceTransformer("all-MiniLM-L6-v2")
     tokenizer = tiktoken.get_encoding("cl100k_base")
 
     chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=20)
@@ -167,7 +206,9 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         reserve_output_token=RESERVE_OUTPUT_TOKEN
     )
-
+    
+    if available_chunk_token <= 0:
+        print("【警告】可用知识库token配额为0，不会加载任何参考文档片段")
     safe_context = clip_context_by_max_token(
         chunk_list=retrieved_chunks,
         token_limit=available_chunk_token,
@@ -180,4 +221,16 @@ if __name__ == "__main__":
         user_query=query
     )
 
+    print("====组装完成的Prompt====")
     print(final_prompt)
+
+    # =========对接大模型接口（此处需要替换为真实信息）=========
+    BEARER_KEY = "在此填入你的key"
+    LLM_MODEL_NAME = "在此填入模型名称"
+
+    try:
+        answer = llm_chat(bearer_key=BEARER_KEY, model_name=LLM_MODEL_NAME, prompt_text=final_prompt)
+        print("\n====大模型返回回答====")
+        print(answer)
+    except RuntimeError as e:
+        print(f"【接口调用异常】{e}")
