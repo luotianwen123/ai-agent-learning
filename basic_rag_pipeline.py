@@ -3,7 +3,7 @@ import numpy as np
 from dataclasses import dataclass
 import tiktoken
 import requests
-
+import json
 @dataclass
 class ChunkItem:
     text: str
@@ -12,7 +12,7 @@ class ChunkItem:
 def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
     separators = ["\n\n", "。", "\n"]
 
-    
+   
     if len(text) <= max_chunk_size:
         return [text]
 
@@ -24,8 +24,9 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
         if split_pos != -1:
             left_part = text[:split_pos + len(sep)]
             right_part = text[split_pos + len(sep):]
-
-            if len(left_part) == len(text) or len(right_part) == len(text):
+            if len(left_part) > max_chunk_size:
+                continue
+            if len(left_part) == len(text):
                 continue
 
             left_list = recursive_split(left_part, max_chunk_size, overlap)
@@ -35,7 +36,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
             found_split = True
             break
 
-    
+   
     if not found_split:
         i = 0
         while i < len(text):
@@ -43,7 +44,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
             all_chunks.append(chunk)
             i += max_chunk_size
 
-   
+
     buffer = []
     buffer_len = 0
     merged_chunks = []
@@ -60,17 +61,31 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
 
-   
-    final_chunks = []
-    for i in range(len(merged_chunks)):
-        current = merged_chunks[i]
-        if i > 0:
-            prev_chunk = merged_chunks[i-1]
-            overlap_text = prev_chunk[-overlap:]
-            current = overlap_text + current
-        final_chunks.append(current)
+    return merged_chunks
 
-    return final_chunks
+def add_overlap_for_chunks(chunk_list: list[str], overlap: int,max_chunk_size: int) -> list[str]:
+    """
+    后处理：给分片增加文本重叠（保留，业务层不调用，用作练习）
+    前提：chunk_list 是 recursive_split产出、无重叠、长度合规的分片
+    :param max_chunk_size: 最大字节限制
+    :param chunk_list: 原始无重叠分片列表
+    :param overlap: 想要重叠的字符数量
+    :return: 带重叠的新分片列表
+    """
+    result = []
+    if overlap>=max_chunk_size:
+        raise ValueError(
+            f"overlap={overlap}非法，不能大于等于max_chunk_size={max_chunk_size}")
+    if overlap<=0:
+        return chunk_list
+    for idx,chunk in enumerate(chunk_list):
+        if idx==0:
+            result.append(chunk)
+        else:
+            prev=chunk_list[idx-1]
+            new_chunk =prev[-overlap:] +chunk
+            result.append(new_chunk)
+    return result
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     a = np.array(vec_a)
@@ -78,7 +93,6 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     dot = np.dot(a, b)
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
-    
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return float(dot / (norm_a * norm_b))
@@ -100,15 +114,6 @@ def calc_available_chunk_quota(model_max_window: int,
                                user_query: str,
                                tokenizer,
                                reserve_output_token: int):
-    """
-    计算还能分给检索上下文chunk的token配额
-    返回：可用token额度，小于等于0代表没有余量放知识库内容
-    :param model_max_window: 模型上下文窗口大小
-    :param system_prompt: 系统提示词
-    :param user_query: 用户提问
-    :param tokenizer: tiktoken分词器实例
-    :param reserve_output_token: 预先留给大模型回答输出的token额度
-    """
     sys_tokens= len(tokenizer.encode(system_prompt))
     query_tokens = len(tokenizer.encode(user_query))
     available_chunk_token = model_max_window - sys_tokens - query_tokens - reserve_output_token
@@ -131,10 +136,6 @@ def clip_context_by_max_token(chunk_list, token_limit, tokenizer):
 def build_rag_prompt(system_prompt: str,
                      safe_context: str,
                      user_query: str) -> str:
-    """
-    组装RAG完整prompt
-    safe_context: 已经经过token裁剪的知识库文本，可能为空字符串
-    """
     parts = [system_prompt]
     if safe_context.strip():
         parts.append("\n【参考文档】")
@@ -163,7 +164,6 @@ def llm_chat(
     }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        
         if resp.status_code == 429:
             raise RuntimeError("接口429限流：请求过于频繁")
         if resp.status_code != 200:
@@ -175,17 +175,18 @@ def llm_chat(
 
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"网络请求异常：{str(e)}")
-
+    except json.JSONDecodeError as e:
+      
+        raise RuntimeError(f"返回JSON解析失败：{str(e)}")
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。
 RAG检索增强生成，通过知识库检索，给大模型补充外部资料，减少幻觉。
 文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息；分块过小丢失完整语义。"""
 
 if __name__ == "__main__":
-    
     model = SentenceTransformer("all-MiniLM-L6-v2")
     tokenizer = tiktoken.get_encoding("cl100k_base")
 
-    chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=20)
+    chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=0)
 
     vector_store: list[ChunkItem] = []
     for c in chunks:
@@ -206,9 +207,10 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         reserve_output_token=RESERVE_OUTPUT_TOKEN
     )
-    
+
     if available_chunk_token <= 0:
         print("【警告】可用知识库token配额为0，不会加载任何参考文档片段")
+
     safe_context = clip_context_by_max_token(
         chunk_list=retrieved_chunks,
         token_limit=available_chunk_token,
@@ -224,7 +226,6 @@ if __name__ == "__main__":
     print("====组装完成的Prompt====")
     print(final_prompt)
 
-    # =========对接大模型接口（此处需要替换为真实信息）=========
     BEARER_KEY = "在此填入你的key"
     LLM_MODEL_NAME = "在此填入模型名称"
 
