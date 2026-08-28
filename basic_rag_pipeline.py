@@ -1,6 +1,6 @@
 from sentence_transformers import SentenceTransformer
-import numpy as np
 from dataclasses import dataclass
+import numpy as np
 import tiktoken
 import requests
 import json
@@ -11,8 +11,6 @@ class ChunkItem:
 
 def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
     separators = ["\n\n", "。", "\n"]
-
-   
     if len(text) <= max_chunk_size:
         return [text]
 
@@ -35,16 +33,12 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
             all_chunks.extend(right_list)
             found_split = True
             break
-
-   
     if not found_split:
         i = 0
         while i < len(text):
             chunk = text[i:i+max_chunk_size]
             all_chunks.append(chunk)
             i += max_chunk_size
-
-
     buffer = []
     buffer_len = 0
     merged_chunks = []
@@ -60,18 +54,9 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
 
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
-
     return merged_chunks
 
 def add_overlap_for_chunks(chunk_list: list[str], overlap: int,max_chunk_size: int) -> list[str]:
-    """
-    后处理：给分片增加文本重叠（保留，业务层不调用，用作练习）
-    前提：chunk_list 是 recursive_split产出、无重叠、长度合规的分片
-    :param max_chunk_size: 最大字节限制
-    :param chunk_list: 原始无重叠分片列表
-    :param overlap: 想要重叠的字符数量
-    :return: 带重叠的新分片列表
-    """
     result = []
     if overlap>=max_chunk_size:
         raise ValueError(
@@ -168,16 +153,14 @@ def llm_chat(
             raise RuntimeError("接口429限流：请求过于频繁")
         if resp.status_code != 200:
             raise RuntimeError(f"接口请求失败，status_code:{resp.status_code}, {resp.text}")
-
-        resp_json = resp.json()
+        try:
+            resp_json = resp.json()
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"返回JSON解析失败：{str(e)}")
         result_text = resp_json["choices"][0]["message"]["content"]
         return result_text
-
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"网络请求异常：{str(e)}")
-    except json.JSONDecodeError as e:
-      
-        raise RuntimeError(f"返回JSON解析失败：{str(e)}")
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。
 RAG检索增强生成，通过知识库检索，给大模型补充外部资料，减少幻觉。
 文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息；分块过小丢失完整语义。"""
@@ -185,7 +168,6 @@ RAG检索增强生成，通过知识库检索，给大模型补充外部资料�
 if __name__ == "__main__":
     model = SentenceTransformer("all-MiniLM-L6-v2")
     tokenizer = tiktoken.get_encoding("cl100k_base")
-
     chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=0)
 
     vector_store: list[ChunkItem] = []
