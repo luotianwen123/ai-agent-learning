@@ -9,14 +9,20 @@ class ChunkItem:
     text: str
     vector: list[float]
 
-def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
+def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = False) -> list[str]:
     separators = ["\n\n", "。", "\n"]
+    if not _raw:
+        if max_chunk_size <= 0:
+            raise ValueError(f"max_chunk_size={max_chunk_size}必须为正整数")
+        if overlap < 0:
+            raise ValueError(f"overlap={overlap}不能为负数")
+        if overlap >= max_chunk_size:
+            raise ValueError(f"overlap={overlap}不能大于等于max_chunk_size={max_chunk_size}")
     if len(text) <= max_chunk_size:
         return [text]
 
     all_chunks = []
     found_split = False
-
     for sep in separators:
         split_pos = text.rfind(sep)
         if split_pos != -1:
@@ -26,9 +32,8 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
                 continue
             if len(left_part) == len(text):
                 continue
-
-            left_list = recursive_split(left_part, max_chunk_size, overlap)
-            right_list = recursive_split(right_part, max_chunk_size, overlap)
+            left_list = recursive_split(left_part, max_chunk_size, overlap, _raw=True)
+            right_list = recursive_split(right_part, max_chunk_size, overlap, _raw=True)
             all_chunks.extend(left_list)
             all_chunks.extend(right_list)
             found_split = True
@@ -54,21 +59,40 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int) -> list[str]:
 
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
-    return merged_chunks
 
-def add_overlap_for_chunks(chunk_list: list[str], overlap: int,max_chunk_size: int) -> list[str]:
+
+    if _raw:
+        return merged_chunks
+
     result = []
-    if overlap>=max_chunk_size:
-        raise ValueError(
-            f"overlap={overlap}非法，不能大于等于max_chunk_size={max_chunk_size}")
-    if overlap<=0:
-        return chunk_list
-    for idx,chunk in enumerate(chunk_list):
-        if idx==0:
+    for idx, chunk in enumerate(merged_chunks):
+        if idx == 0:
             result.append(chunk)
         else:
-            prev=chunk_list[idx-1]
-            new_chunk =prev[-overlap:] +chunk
+            prev = merged_chunks[idx - 1]
+            new_chunk = prev[-overlap:] + chunk
+        
+            if len(new_chunk) > max_chunk_size:
+                new_chunk = new_chunk[-max_chunk_size:]
+            result.append(new_chunk)
+    return result
+
+
+def add_overlap_for_chunks(chunk_list: list[str], overlap: int, max_chunk_size: int) -> list[str]:
+    result = []
+    if overlap >= max_chunk_size:
+        raise ValueError(f"overlap={overlap}非法，不能大于等于max_chunk_size={max_chunk_size}")
+    if overlap <= 0 or not chunk_list:
+        return chunk_list
+
+    for idx, chunk in enumerate(chunk_list):
+        if idx == 0:
+            result.append(chunk)
+        else:
+            prev = chunk_list[idx - 1]
+            new_chunk = prev[-overlap:] + chunk
+            if len(new_chunk) > max_chunk_size:
+                new_chunk = new_chunk[-max_chunk_size:]
             result.append(new_chunk)
     return result
 
@@ -168,7 +192,8 @@ RAG检索增强生成，通过知识库检索，给大模型补充外部资料�
 if __name__ == "__main__":
     model = SentenceTransformer("all-MiniLM-L6-v2")
     tokenizer = tiktoken.get_encoding("cl100k_base")
-    chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=0)
+
+    chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=30)
 
     vector_store: list[ChunkItem] = []
     for c in chunks:
