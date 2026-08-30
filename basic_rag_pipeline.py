@@ -77,25 +77,6 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             result.append(new_chunk)
     return result
 
-
-def add_overlap_for_chunks(chunk_list: list[str], overlap: int, max_chunk_size: int) -> list[str]:
-    result = []
-    if overlap >= max_chunk_size:
-        raise ValueError(f"overlap={overlap}非法，不能大于等于max_chunk_size={max_chunk_size}")
-    if overlap <= 0 or not chunk_list:
-        return chunk_list
-
-    for idx, chunk in enumerate(chunk_list):
-        if idx == 0:
-            result.append(chunk)
-        else:
-            prev = chunk_list[idx - 1]
-            new_chunk = prev[-overlap:] + chunk
-            if len(new_chunk) > max_chunk_size:
-                new_chunk = new_chunk[-max_chunk_size:]
-            result.append(new_chunk)
-    return result
-
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     a = np.array(vec_a)
     b = np.array(vec_b)
@@ -190,7 +171,7 @@ RAG检索增强生成，通过知识库检索，给大模型补充外部资料�
 文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息；分块过小丢失完整语义。"""
 
 if __name__ == "__main__":
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     tokenizer = tiktoken.get_encoding("cl100k_base")
 
     chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=30)
