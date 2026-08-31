@@ -28,11 +28,18 @@ AI Agent、RAG学习练习项目，手写Demo
 **原因**：requests 拿到的响应不保证是合法 JSON，直接 resp.json() 会抛 JSONDecodeError。
 **解决**：llm_chat 中将 resp.json() 包进 try/except，解析失败抛出带上下文的 RuntimeError。
 
-### 待填（遇到就记）
-- HuggingFace 下载模型网络问题（镜像源）
-- 全局变量警告
-- join 空列表得到空字符串
+### 坑 3：HuggingFace 下载模型网络问题（镜像源
+**现象**：使用 sentence-transformers 或 transformers 库加载模型（ all-MiniLM-L6-v2）时，代码卡在下载阶段，长时间无响应或直接抛出网络连接超时异常。
+**原因**：Hugging Face 的模型文件托管在海外服务器，国内网络直连极不稳定。
+**解决**：将模型文件打包进项目目录，与代码一同管理，避免每次部署都需要重新下载。
 
+### 坑 4：全局变量警告
+**现象**：在模块顶层定义了一个变量（比如 DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"），然后在函数内部尝试修改它，或在另一个模块中直接引用它，结果触发了两种警告(报黄色波浪线警告,程序运行时的逻辑错误)。
+**原因**：Python的作用域规则：在函数内部对变量进行赋值操作时，默认会创建或修改一个局部变量，而不是修改全局变量。我在函数内部写了 DEFAULT_MODEL_NAME = "new_value"，Python会把它当作一个全新的局部变量，而不会去修改顶层的同名变量。
+**解决**：在函数内部需要修改全局变量，使用 global 关键字明确声明。
+
+### 待填（遇到就记）
+- join 空列表得到空字符串
 ## 依赖包
 sentence‑transformers>=2.7.0
 numpy>=1.26.0
