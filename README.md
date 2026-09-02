@@ -1,26 +1,22 @@
 # ai-agent-learning
-AI Agent、RAG学习练习项目的学习记录
 
-## 项目介绍
-手写练习AI Agent与RAG，底层逻辑全部手动实现，用于学习大模型应用开发。
+个人学习记录。从 Python 基础补起，逐步手写实现 AI Agent 与 RAG 的核心链路。
+
+> 说明：仓库中的早期代码有一部分是在 AI 辅助下完成的，我正在逐个重写成能独立讲解的版本。下面的模块描述只写目前能讲清楚的部分，讲不清的等重写完再补回来。
 
 ## 项目模块
-- simple_agent.py：简易对话客户端，实现对话记忆持久化（JSON）、历史截断、异常处理（早期在 AI 辅助下完成，正在重写为可独立讲解的版本）
-- basic_rag_pipeline.py：内存版RAG完整链路，不依赖第三方向量库，分块/向量化/检索/组装全部手动实现（早期在 AI 辅助下完成，正在重写为可独立讲解的版本）
-- tool_agent.py：无框架手写 ReAct Agent（DeepSeek API + Function Calling），循环执行工具调用直至给出答案，支持时间查询/数学计算/文件读取，带错误回传与 max_steps 防死循环
 
-## RAG完整链路
-原始文档 →文本分块 →Embedding向量化 →相似度检索 →拼接上下文 →Prompt组装 →调用LLM接口
+- `simple_agent_demo.py`：简易对话客户端，实现对话记忆持久化（JSON）、历史截断、异常处理。（早期在 AI 辅助下完成，正在重写）
+- `basic_rag_pipeline.py`：内存版 RAG 链路练习，包含分块 / 向量化 / 检索 / 组装。（早期在 AI 辅助下完成，正在重写）
+- `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），实现工具调用循环。
 
-## 已处理边界问题
-1. 检索返回为空，上下文为空字符串兜底防护
-2. top‑k参数越界保护
-3. 上下文token预算：按模型窗口减去系统提示/用户问题/预留输出动态计算，防止超限
+## 学习日志
 
-## 踩坑记录
-（...）
+`learning-log.md`：每天的练习内容、卡点和次日计划，持续更新。
+
 ## 依赖包
-sentence‑transformers>=2.7.0
+
+sentence-transformers>=2.7.0
 numpy>=1.26.0
 tiktoken
 requests
