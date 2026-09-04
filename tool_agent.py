@@ -81,12 +81,14 @@ def call_llm(messages):
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             timeout=30,
         )
-        resp.raise_for_status()
-        data=resp.json()
-        reply=data["choices"][0]["message"]
-        reply["done"]=not reply.get("tool_calls")
+        resp.raise_for_status()#将要出现的HTTP 状态码、异常问题立刻抛出，不这么写我们的代码会拿着错误的响应继续执行，短期内脚本可以跑，但是出错时会加大我们的排查成本
+        data=resp.json()#反序列化、JSON 字符串将其变成python的字典/列表，不写它，你拿到的只是文本，没法用 `data["键"]` 取值；写了它，才能像操作普通字典一样操作接口数据。
+        reply=data["choices"][0]["message"] #一层层打开嵌套结构、挖到最深处的值（列表索引、嵌套取值），choices 是列表：因为能返回多个答案，有序集合
+                                            #data["choices"]["message"] → TypeError（列表不能用字符串索引）
+                                            #data["message"] → KeyError（顶层没有这个键）
+        reply["done"]=not reply.get("tool_calls")#首先左边用reply["done"]是用 [] 赋值，新增一个我们自己定义的键 done，done 的作用标记"这一轮还要不要继续循环"——是整个 ReAct 循环的终止开关;不用.get() ，是因为.get()不能当赋值目标，右边是我们读可选字段使用的，当读取的字段键不存在是我们用[]硬取会抛 KeyError崩溃，而.get没传第二个参数会返回none not 在这里不是取反，是整个 ReAct 循环的终止开关,是用来判断有没有工具调用的场景出现读取可选字段：模型想调工具时才有这个键，不给工具时根本不存在。用 [] 硬取 → KeyError；.get() 没传第二参数 → 返回 None
         return reply
-    except Exception as e:
+    except Exception as e:#89-91我们工具层只负责记录，不负责处理（业务层根据具体要求处理），不写的话我们只会知道系统报错，但具体是什么错误，哪里出错我们不知情
         print(f"调用大模型失败：{e}")
         raise
 def run_agent(task):
