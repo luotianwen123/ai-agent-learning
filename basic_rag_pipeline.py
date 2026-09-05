@@ -1,3 +1,16 @@
+"""
+一个轻量级 RAG（检索增强生成）示例：
+将知识文档分块 -> 用 bge-small-zh 向量化 -> 按余弦相似度检索 TopK 片段 ->
+按 token 预算裁剪上下文后组装 prompt，调用 DeepSeek Chat API 生成回答。
+
+依赖安装：
+    pip install sentence-transformers tiktoken requests numpy python-dotenv
+
+运行：
+    1. 在 .env 中填入 OPENAI_API_KEY（DeepSeek 开放平台申请的 API Key）
+    2. python rag_main.py
+    3. 首次运行会自动下载向量模型 BAAI/bge-small-zh-v1.5
+"""
 from sentence_transformers import SentenceTransformer
 from dataclasses import dataclass
 import numpy as np
@@ -89,7 +102,7 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
         return 0.0
     return float(dot / (norm_a * norm_b))
 
-def retrieve(query: str, model, vector_store: list[ChunkItem], top_k=2):
+def retrieve(query: str, model, vector_store: list[ChunkItem], top_k: int = 2) -> list[str]:
     top_k = min(top_k, len(vector_store))
     q_emb = model.encode(query)
     score_list = []
@@ -105,7 +118,7 @@ def calc_available_chunk_quota(model_max_window: int,
                                system_prompt: str,
                                user_query: str,
                                tokenizer,
-                               reserve_output_token: int):
+                               reserve_output_token: int) -> int:
     sys_tokens = len(tokenizer.encode(system_prompt))
     query_tokens = len(tokenizer.encode(user_query))
     available_chunk_token = model_max_window - sys_tokens - query_tokens - reserve_output_token
@@ -113,7 +126,7 @@ def calc_available_chunk_quota(model_max_window: int,
         return 0
     return available_chunk_token
 
-def clip_context_by_max_token(chunk_list, token_limit, tokenizer):
+def clip_context_by_max_token(chunk_list: list[str], token_limit: int, tokenizer) -> str:
     total_tokens = 0
     keep_chunks = []
     for one_chunk in chunk_list:
