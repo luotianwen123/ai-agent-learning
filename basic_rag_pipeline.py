@@ -4,6 +4,14 @@ import numpy as np
 import tiktoken
 import requests
 import json
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+API_KEY = os.getenv("RAG_API_KEY")
+BASE_URL = "接口地址"
+MODEL_NAME = "模型名称"
+
 @dataclass
 class ChunkItem:
     text: str
@@ -20,7 +28,6 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             raise ValueError(f"overlap={overlap}不能大于等于max_chunk_size={max_chunk_size}")
     if len(text) <= max_chunk_size:
         return [text]
-
     all_chunks = []
     found_split = False
     for sep in separators:
@@ -56,14 +63,10 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
         else:
             buffer.append(chunk)
             buffer_len += chunk_len
-
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
-
-
     if _raw:
         return merged_chunks
-
     result = []
     for idx, chunk in enumerate(merged_chunks):
         if idx == 0:
@@ -71,7 +74,6 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
         else:
             prev = merged_chunks[idx - 1]
             new_chunk = prev[-overlap:] + chunk
-        
             if len(new_chunk) > max_chunk_size:
                 new_chunk = new_chunk[-max_chunk_size:]
             result.append(new_chunk)
@@ -94,7 +96,7 @@ def retrieve(query: str, model, vector_store: list[ChunkItem], top_k=2):
     for item in vector_store:
         score = cosine_similarity(q_emb, item.vector)
         score_list.append((score, item.text))
-    score_list.sort(key=lambda x:x[0], reverse=True)
+    score_list.sort(key=lambda x: x[0], reverse=True)
     recall_result = score_list[:top_k]
     top_chunks = [text for score, text in recall_result]
     return top_chunks
@@ -104,7 +106,7 @@ def calc_available_chunk_quota(model_max_window: int,
                                user_query: str,
                                tokenizer,
                                reserve_output_token: int):
-    sys_tokens= len(tokenizer.encode(system_prompt))
+    sys_tokens = len(tokenizer.encode(system_prompt))
     query_tokens = len(tokenizer.encode(user_query))
     available_chunk_token = model_max_window - sys_tokens - query_tokens - reserve_output_token
     if available_chunk_token <= 0:
@@ -138,9 +140,9 @@ def llm_chat(
     bearer_key: str,
     model_name: str,
     prompt_text: str,
-    max_output_tokens:int = 512
+    base_url: str,
+    max_output_tokens: int = 512
 ) -> str:
-    url = "填入你的接口地址"
     headers = {
         "Authorization": f"Bearer {bearer_key}",
         "Content-Type": "application/json"
@@ -148,12 +150,12 @@ def llm_chat(
     payload = {
         "model": model_name,
         "messages": [
-            {"role":"user", "content": prompt_text}
+            {"role": "user", "content": prompt_text}
         ],
         "max_tokens": max_output_tokens
     }
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp = requests.post(base_url, headers=headers, json=payload, timeout=30)
         if resp.status_code == 429:
             raise RuntimeError("接口429限流：请求过于频繁")
         if resp.status_code != 200:
@@ -166,6 +168,7 @@ def llm_chat(
         return result_text
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"网络请求异常：{str(e)}")
+
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。
 RAG检索增强生成，通过知识库检索，给大模型补充外部资料，减少幻觉。
 文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息；分块过小丢失完整语义。"""
@@ -173,21 +176,16 @@ RAG检索增强生成，通过知识库检索，给大模型补充外部资料�
 if __name__ == "__main__":
     model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     tokenizer = tiktoken.get_encoding("cl100k_base")
-
     chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=30)
-
     vector_store: list[ChunkItem] = []
     for c in chunks:
         emb = model.encode(c).tolist()
         vector_store.append(ChunkItem(text=c, vector=emb))
-
     query = "什么是RAG？"
     retrieved_chunks = retrieve(query, model, vector_store, top_k=2)
-
     system_prompt = "你是知识库问答助手，请依据下面参考文档回答用户问题，如果文档没有答案就如实说明，禁止编造幻觉内容。"
     MODEL_MAX_WINDOW = 4096
     RESERVE_OUTPUT_TOKEN = 512
-
     available_chunk_token = calc_available_chunk_quota(
         model_max_window=MODEL_MAX_WINDOW,
         system_prompt=system_prompt,
@@ -195,30 +193,27 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         reserve_output_token=RESERVE_OUTPUT_TOKEN
     )
-
     if available_chunk_token <= 0:
         print("【警告】可用知识库token配额为0，不会加载任何参考文档片段")
-
     safe_context = clip_context_by_max_token(
         chunk_list=retrieved_chunks,
         token_limit=available_chunk_token,
         tokenizer=tokenizer
     )
-
     final_prompt = build_rag_prompt(
         system_prompt=system_prompt,
         safe_context=safe_context,
         user_query=query
     )
-
     print("====组装完成的Prompt====")
     print(final_prompt)
-
-    BEARER_KEY = "在此填入你的key"
-    LLM_MODEL_NAME = "在此填入模型名称"
-
     try:
-        answer = llm_chat(bearer_key=BEARER_KEY, model_name=LLM_MODEL_NAME, prompt_text=final_prompt)
+        answer = llm_chat(
+            bearer_key=API_KEY,
+            model_name=MODEL_NAME,
+            prompt_text=final_prompt,
+            base_url=BASE_URL
+        )
         print("\n====大模型返回回答====")
         print(answer)
     except RuntimeError as e:
