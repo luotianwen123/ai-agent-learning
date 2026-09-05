@@ -8,9 +8,9 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-API_KEY = os.getenv("RAG_API_KEY")
-BASE_URL = "接口地址"
-MODEL_NAME = "模型名称"
+API_KEY = os.getenv("OPENAI_API_KEY")
+BASE_URL = "https://api.deepseek.com/chat/completions"
+MODEL = "deepseek-chat"
 
 @dataclass
 class ChunkItem:
@@ -210,7 +210,7 @@ if __name__ == "__main__":
     try:
         answer = llm_chat(
             bearer_key=API_KEY,
-            model_name=MODEL_NAME,
+            model_name=MODEL,
             prompt_text=final_prompt,
             base_url=BASE_URL
         )
