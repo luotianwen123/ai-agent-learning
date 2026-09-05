@@ -8,7 +8,7 @@
 
 运行：
     1. 在 .env 中填入 OPENAI_API_KEY（DeepSeek 开放平台申请的 API Key）
-    2. python rag_main.py
+    2. python basic_rag_pipeline.py
     3. 首次运行会自动下载向量模型 BAAI/bge-small-zh-v1.5
 """
 from sentence_transformers import SentenceTransformer
@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
+if not API_KEY:
+    raise ValueError("OPENAI_API_KEY 未配置，请在 .env 文件中填写")
 BASE_URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-chat"
 
