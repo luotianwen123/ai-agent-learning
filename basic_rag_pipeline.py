@@ -34,6 +34,7 @@ class ChunkItem:
 
 def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = False) -> list[str]:
     separators = ["\n\n", "。", "\n"]
+    # 参数校验只在最外层跑，递归进去跳过
     if not _raw:
         if max_chunk_size <= 0:
             raise ValueError(f"max_chunk_size={max_chunk_size}必须为正整数")
@@ -54,6 +55,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
                 continue
             if len(left_part) == len(text):
                 continue
+            # 传 _raw=True 拿原始分片，避免每层都叠一次重叠
             left_list = recursive_split(left_part, max_chunk_size, overlap, _raw=True)
             right_list = recursive_split(right_part, max_chunk_size, overlap, _raw=True)
             all_chunks.extend(left_list)
@@ -80,9 +82,11 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             buffer_len += chunk_len
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
+    # 递归内部直接返回，重叠只在最外层拼一次
     if _raw:
         return merged_chunks
     result = []
+    # 一体化处理，根治重叠无限膨胀
     for idx, chunk in enumerate(merged_chunks):
         if idx == 0:
             result.append(chunk)
@@ -90,6 +94,7 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             prev = merged_chunks[idx - 1]
             new_chunk = prev[-overlap:] + chunk
             if len(new_chunk) > max_chunk_size:
+                # 超上限截断，避免块越叠越长
                 new_chunk = new_chunk[-max_chunk_size:]
             result.append(new_chunk)
     return result
@@ -182,6 +187,7 @@ def llm_chat(
         result_text = resp_json["choices"][0]["message"]["content"]
         return result_text
     except requests.exceptions.RequestException as e:
+        # 工具层只记录不处理，交给业务层决定
         raise RuntimeError(f"网络请求异常：{str(e)}")
 
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。
