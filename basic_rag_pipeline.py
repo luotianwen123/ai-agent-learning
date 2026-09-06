@@ -187,7 +187,7 @@ def llm_chat(
         result_text = resp_json["choices"][0]["message"]["content"]
         return result_text
     except requests.exceptions.RequestException as e:
-        # 工具层只记录不处理，交给业务层决定
+        # 工具层只做异常包装，交给业务层决定
         raise RuntimeError(f"网络请求异常：{str(e)}")
 
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。
