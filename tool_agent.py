@@ -67,6 +67,7 @@ tools=[{"type":"function",
             }},}
        ]
 
+# 名字→函数映射表：模型只返回字符串（如"calculator"），Python 只认函数对象，靠这张表把字符串翻译成真正可调用的函数
 tool_map ={"get_current_time":get_current_time,"calculator":calculator,"read_file":read_file}
 
 def call_llm(messages):
@@ -110,20 +111,22 @@ def run_agent(task):
             break
         for tc in reply["tool_calls"]:
             name=tc["function"]["name"]
+            # json.loads：模型给的 arguments 是 JSON 字符串，转成 Python 字典后才能按键取值、传给函数
             args=json.loads(tc["function"]["arguments"])
             print(f"  执行工具：{name}，参数：{args}")
+            # **args 把字典拆成关键字参数；这一行就是 ReAct 的 A（行动）：选定工具并真正执行，返回值就是下一步的观察结果
             result=tool_map[name](**args)
             messages.append({
                 "role":"tool",
+                # 回填模型下发的 tool_call_id：API 靠它把这条结果和对应的工具调用对上；ID 对不上关联就会失败，模型拿不到正确的执行结果
                 "tool_call_id":tc["id"],
                 "content":json.dumps(result,ensure_ascii=False),
             })
     if step>=max_steps:
         print("\n超限，强制结束")
+    # messages[-1] 负索引取最后一轮消息；.get("content","") 键不存在时返回空串而不是抛 KeyError，避免最后没内容时直接崩溃
     final = messages[-1].get("content", "")
     print(f"\n===== 最终答案 =====\n{final}")
     return final
 if __name__ == "__main__":
     run_agent("现在几点")
-
-
