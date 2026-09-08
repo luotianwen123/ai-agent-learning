@@ -93,6 +93,7 @@ def call_llm(messages):
         print(f"调用大模型失败：{e}")
         raise
 def run_agent(task):
+    # 列表套字典：外层为什么是列表？因为整段对话是一串按顺序排列的消息（用户、助手、工具轮流出现），不是一条；列表里每个字典才是一条消息，role 记是谁说的，content 记说了什么
     messages=[{"role":"user","content":task}]
     max_steps=5
     step=0
@@ -105,10 +106,12 @@ def run_agent(task):
             print(f"调用大模型失败：{e}")
             break
 
+        # 为什么是追加不是覆盖：每轮回复都要接到对话历史的尾部，下一轮模型才能读到完整上下文；一旦覆盖，模型就"失忆"，不知道前面说过什么
         messages.append(reply)
         if reply["done"]:
             print("回答完毕")
             break
+        # 遍历列表里的字典：tool_calls 是一个列表，模型一轮可能同时返回多个工具调用请求，不是只有一个；每个 tc 就是其中一次调用对应的字典
         for tc in reply["tool_calls"]:
             name=tc["function"]["name"]
             # json.loads：模型给的 arguments 是 JSON 字符串，转成 Python 字典后才能按键取值、传给函数
@@ -120,6 +123,7 @@ def run_agent(task):
                 "role":"tool",
                 # 回填模型下发的 tool_call_id：API 靠它把这条结果和对应的工具调用对上；ID 对不上关联就会失败，模型拿不到正确的执行结果
                 "tool_call_id":tc["id"],
+                # json.dumps 是序列化（和前面 resp.json() 的反序列化正好相反）：函数返回的是 Python 对象，而消息 content 只收字符串，所以要把字典/列表转成 JSON 字符串；ensure_ascii=False 表示中文不转义成 \uXXXX，直接原样保留
                 "content":json.dumps(result,ensure_ascii=False),
             })
     if step>=max_steps:
