@@ -1,5 +1,6 @@
 import requests
 import datetime
+import time
 import json
 import os
 from dotenv import load_dotenv
@@ -9,20 +10,31 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL ="https://api.deepseek.com/chat/completions"
 MODEL="deepseek-chat"
 
+#当前工具都是本地操作，retry 主要面向未来的外部 API 工具
+def retry(func):
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for i in range(3):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                print(f"第{i+1}次失败:{e}")
+                time.sleep(i+1)
+        return f"错误信息:{last_error}"
+    return wrapper
+
+@retry
 def get_current_time():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+@retry
 def calculator(expression):
-    try:
-        result=eval(expression)
-        return result
-    except Exception as e:
-        return f"error信息{e}"
+    result=eval(expression)
+    return result
+@retry
 def read_file(file_path):
-    try:
-        with open(file_path) as f:
-            return f.read()
-    except Exception as e:
-        return f"错误信息是str{e}"
+    with open(file_path) as f:
+        return f.read()
 
 tools=[{"type":"function",
         "function":{
