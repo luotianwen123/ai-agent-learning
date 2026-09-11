@@ -35,6 +35,14 @@ def calculator(expression):
 def read_file(file_path):
     with open(file_path) as f:
         return f.read()
+@retry
+def get_weather(city):
+    resp=requests.get(f"https://wttr.in/{city}?format=j1",timeout=5)
+    resp.raise_for_status()
+    data=resp.json()
+    temp=data["current_condition"][0]["temp_C"]
+    weatherDesc=data["current_condition"][0]["weatherDesc"][0]["value"]
+    return f"{city}:{temp}°C,{weatherDesc}"
 
 tools=[{"type":"function",
         "function":{
@@ -76,11 +84,29 @@ tools=[{"type":"function",
                     }
                 },
                 "required": ["file_path"]
-            }},}
+            }
+        }
+    },
+       {"type": "function",
+        "function": {
+            "name": "get_weather",
+            "description":"查询指定城市的当前温度与天气，当用户询问某地天气时使用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city":{
+                        "type": "string",
+                        "description":"要查询天气的城市名"
+                    }
+                },
+                "required": ["city"]
+            }
+        }
+        }
        ]
 
 # 工具名(字符串)→函数映射：模型只返回工具名，靠这张表翻译成真正可调用的函数
-tool_map ={"get_current_time":get_current_time,"calculator":calculator,"read_file":read_file}
+tool_map ={"get_current_time":get_current_time,"calculator":calculator,"read_file":read_file,"get_weather":get_weather}
 
 def call_llm(messages):
     try:
