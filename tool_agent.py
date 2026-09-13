@@ -1,8 +1,10 @@
+from json import JSONDecodeError
 import requests
 import datetime
 import time
 import json
 import os
+from functools import wraps
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,34 +14,36 @@ MODEL="deepseek-chat"
 
 #当前工具都是本地操作，retry 主要面向未来的外部 API 工具
 def retry(func):
-    def wrapper(*args, **kwargs):
+    @wraps(func)
+        def wrapper(*args, **kwargs):
         last_error = None
         for i in range(3):
             try:
                 return func(*args, **kwargs)
+            except (TypeError,json.JSONDecodeError,FileNotFoundError,NameError,SyntaxError) as e:
+                return f"【{func.__name__}】永久性错误，不重试：{e}"
             except Exception as e:
                 last_error = e
                 print(f"第{i+1}次失败:{e}")
                 time.sleep(i+1)
-        return f"错误信息:{last_error}"
+        return f"【{func.__name__}】重试 3 次仍失败：{last_error}"
     return wrapper
 
 @retry
-def get_current_time():
+def get_current_time()->str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 @retry
-def calculator(expression):
-    result=eval(expression)
-    return result
+def calculator(expression:str)->int|float|str:
+    return eval(expression)
 @retry
-def read_file(file_path):
+def read_file(file_path:str)->str:
     with open(file_path) as f:
         return f.read()
 @retry
-def get_weather(city):
+def get_weather(city:str)->str:
     resp=requests.get(f"https://wttr.in/{city}?format=j1",timeout=5)
     resp.raise_for_status()
-    data=resp.json()
+    data:dict=resp.json()
     temp=data["current_condition"][0]["temp_C"]
     weatherDesc=data["current_condition"][0]["weatherDesc"][0]["value"]
     return f"{city}:{temp}°C,{weatherDesc}"
