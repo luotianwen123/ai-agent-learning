@@ -1,13 +1,3 @@
-""" 一个轻量级 RAG（检索增强生成）示例：
-将知识文档分块 -> 用 bge-small-zh 向量化 -> 按余弦相似度检索 TopK 片段 -> 按 token 预算裁剪上下文后组装 prompt，调用 DeepSeek Chat API 生成回答。
-
-依赖安装：
-    pip install sentence-transformers tiktoken requests numpy python-dotenv
-运行：
-    1. 在 .env 中填入 OPENAI_API_KEY（DeepSeek 开放平台申请的 API Key）
-    2. python basic_rag_pipeline.py
-    3. 首次运行会自动下载向量模型 BAAI/bge-small-zh-v1.5
-"""
 from sentence_transformers import SentenceTransformer
 from dataclasses import dataclass
 import numpy as np
@@ -41,17 +31,21 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             raise ValueError(f"overlap={overlap}不能为负数")
         if overlap >= max_chunk_size:
             raise ValueError(f"overlap={overlap}不能大于等于max_chunk_size={max_chunk_size}")
-    if len(text) <= max_chunk_size:
+
+    # 原始无重叠块上限：预留重叠空间，拼接后刚好等于max_chunk_size
+    raw_chunk_max = max_chunk_size - overlap
+
+    if len(text) <= raw_chunk_max:
         return [text]
     all_chunks = []
     found_split = False
     for sep in separators:
-        split_pos = text.find(sep)
+        # 【核心修复】在前raw_chunk_max范围内，从右往左找最后一个分隔符
+        # 保证左半块不超长度上限，且尽可能在语义边界断开
+        split_pos = text[:raw_chunk_max].rfind(sep)
         if split_pos != -1:
             left_part = text[:split_pos + len(sep)]
             right_part = text[split_pos + len(sep):]
-            if len(left_part) > max_chunk_size:
-                continue
             if len(left_part) == len(text):
                 continue
             # 传 _raw=True 拿原始分片，避免每层都叠一次重叠
@@ -63,18 +57,16 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             break
     if not found_split:
         i = 0
-        step = max_chunk_size - overlap
         while i < len(text):
-            chunk = text[i:i+max_chunk_size]
+            chunk = text[i:i + raw_chunk_max]
             all_chunks.append(chunk)
-            i += step
-
-    raw_chunk_max = max_chunk_size - overlap
+            i += raw_chunk_max
     buffer = []
     buffer_len = 0
     merged_chunks = []
     for chunk in all_chunks:
         chunk_len = len(chunk)
+        # 新增缓冲区非空判断，避免空块；阈值统一用原始块上限
         if buffer and buffer_len + chunk_len > raw_chunk_max:
             merged_chunks.append("".join(buffer))
             buffer = [chunk]
@@ -84,7 +76,6 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             buffer_len += chunk_len
     if buffer_len != 0:
         merged_chunks.append("".join(buffer))
-
     # 递归内部直接返回，重叠只在最外层拼一次
     if _raw:
         return merged_chunks
@@ -96,8 +87,8 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
         else:
             prev = merged_chunks[idx - 1]
             new_chunk = prev[-overlap:] + chunk
-            # 兜底截断：从头截取，保留前面重叠区域
             if len(new_chunk) > max_chunk_size:
+                # 超上限从前向后截断，保留前置重叠上下文
                 new_chunk = new_chunk[:max_chunk_size]
             result.append(new_chunk)
     return result
@@ -166,11 +157,11 @@ def build_rag_prompt(system_prompt: str,
 
 
 def llm_chat(
-    bearer_key: str,
-    model_name: str,
-    prompt_text: str,
-    base_url: str,
-    max_output_tokens: int = 512
+        bearer_key: str,
+        model_name: str,
+        prompt_text: str,
+        base_url: str,
+        max_output_tokens: int = 512
 ) -> str:
     headers = {
         "Authorization": f"Bearer {bearer_key}",
@@ -178,7 +169,9 @@ def llm_chat(
     }
     payload = {
         "model": model_name,
-        "messages": [{"role": "user", "content": prompt_text}],
+        "messages": [
+            {"role": "user", "content": prompt_text}
+        ],
         "max_tokens": max_output_tokens
     }
     try:
@@ -206,16 +199,10 @@ if __name__ == "__main__":
     model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     tokenizer = tiktoken.get_encoding("cl100k_base")
     chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=30)
-    print("===生成的所有chunk===")
-    for idx, c in enumerate(chunks):
-        print(f"\nchunk {idx}, len={len(c)}")
-        print(repr(c))
-
     vector_store: list[ChunkItem] = []
     for c in chunks:
         emb = model.encode(c).tolist()
         vector_store.append(ChunkItem(text=c, vector=emb))
-
     query = "什么是RAG？"
     retrieved_chunks = retrieve(query, model, vector_store, top_k=2)
     system_prompt = "你是知识库问答助手，请依据下面参考文档回答用户问题，如果文档没有答案就如实说明，禁止编造幻觉内容。"
@@ -240,7 +227,7 @@ if __name__ == "__main__":
         safe_context=safe_context,
         user_query=query
     )
-    print("\n====组装完成的Prompt====")
+    print("====组装完成的Prompt====")
     print(final_prompt)
     try:
         answer = llm_chat(
