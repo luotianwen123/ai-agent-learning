@@ -69,7 +69,6 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             all_chunks.append(chunk)
             i += step
 
-    # ========== A方案改动：原始合并上限预留overlap空间 ==========
     raw_chunk_max = max_chunk_size - overlap
     buffer = []
     buffer_len = 0
