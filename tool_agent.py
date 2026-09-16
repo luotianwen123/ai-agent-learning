@@ -6,7 +6,6 @@ import json
 import os
 from functools import wraps
 from dotenv import load_dotenv
-
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL ="https://api.deepseek.com/chat/completions"
@@ -15,7 +14,7 @@ MODEL="deepseek-chat"
 #当前工具都是本地操作，retry 主要面向未来的外部 API 工具
 def retry(func):
     @wraps(func)
-        def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs):
         last_error = None
         for i in range(3):
             try:
@@ -173,4 +172,4 @@ def run_agent(task):
     print(f"\n===== 最终答案 =====\n{final}")
     return final
 if __name__ == "__main__":
-    run_agent("现在几点")
+    run_agent("郑州天气怎么样")
