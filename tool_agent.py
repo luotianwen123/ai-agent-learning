@@ -6,12 +6,10 @@ import json
 import os
 from functools import wraps
 from dotenv import load_dotenv
-
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL ="https://api.deepseek.com/chat/completions"
 MODEL="deepseek-chat"
-
 # 当前工具都是本地操作，retry 主要面向未来的外部 API 工具
 def retry(func):
     @wraps(func)
@@ -28,29 +26,24 @@ def retry(func):
                 time.sleep(i+1)
         return f"【{func.__name__}】重试 3 次仍失败：{last_error}"
     return wrapper
-
 @retry
 def get_current_time()->str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 @retry
 def calculator(expression:str)->int|float|str:
     return eval(expression)
-
 @retry
 def read_file(file_path:str)->str:
     with open(file_path) as f:
         return f.read()
-
 @retry
 def get_weather(city:str)->str:
     resp=requests.get(f"https://wttr.in/{city}?format=j1",timeout=5)
-    resp.raise_for_status()
-    data:dict=resp.json()
+    resp.raise_for_status()  # 非 2xx 状态码立刻抛异常，避免拿错误的响应继续执行
+    data:dict=resp.json()  # 反序列化：JSON 文本→Python 字典/列表，之后才能按键取值
     temp=data["current_condition"][0]["temp_C"]
     weatherdesc=data["current_condition"][0]["weatherDesc"][0]["value"]
     return f"{city}:{temp}°C,{weatherdesc}"
-
 tools=[
     {
         "type":"function",
@@ -107,7 +100,7 @@ tools=[
                 "type": "object",
                 "properties": {
                     "city":{
-                        "type": "string",
+                        "type":"string",
                         "description":"要查询天气的城市名"
                     }
                 },
@@ -116,7 +109,6 @@ tools=[
         }
     }
 ]
-
 # 工具名(字符串)→函数映射：模型只返回工具名，靠这张表翻译成真正可调用的函数
 tool_map ={
     "get_current_time":get_current_time,
@@ -124,7 +116,6 @@ tool_map ={
     "read_file":read_file,
     "get_weather":get_weather
 }
-
 def call_llm(messages):
     try:
         body={
@@ -138,19 +129,17 @@ def call_llm(messages):
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             timeout=30,
         )
-        resp.raise_for_status()
-        data=resp.json()
-        reply=data["choices"][0]["message"]
-        reply["done"]=not reply.get("tool_calls")
+        resp.raise_for_status()  # 非 2xx 状态码立刻抛异常，避免拿错误的响应继续执行
+        data=resp.json()  # 反序列化：JSON 文本→Python 字典/列表，之后才能按键取值
+        reply=data["choices"][0]["message"]  # 嵌套取值：choices 是列表(可能有多个候选)，取第一个的 message
+        reply["done"]=not reply.get("tool_calls")  # 自定义终止开关：没有工具调用则结束循环；tool_calls 是可选键(想调工具时才存在)，用 .get() 避免 KeyError
         return reply
-    except Exception as e:
+    except Exception as e:  # 工具层只记录不处理，具体应对交给上层
         print(f"调用大模型失败：{e}")
         raise
-
 DEFAULT_MAX_STEPS = 5
-
 def run_agent(task,max_steps=DEFAULT_MAX_STEPS):
-    messages=[{"role":"user","content":task}]
+    messages=[{"role":"user","content":task}]  # 消息历史是"列表套字典"：列表保存按顺序排列的每条消息；字典里 role 记谁说的、content 记内容
     step=0
     while step<max_steps:
         step+=1
@@ -160,29 +149,26 @@ def run_agent(task,max_steps=DEFAULT_MAX_STEPS):
         except Exception as e:
             print(f"调用大模型失败：{e}")
             break
-
-        messages.append(reply)
+        messages.append(reply)  # 追加而非覆盖：每轮回复接到历史尾部，下一轮模型才能读到完整上下文
         if reply["done"]:
             print("回答完毕")
             break
-
+        # tool_calls 是列表：模型一轮可能同时请求多个工具调用，逐个遍历执行
         for tc in reply["tool_calls"]:
             name=tc["function"]["name"]
-            args=json.loads(tc["function"]["arguments"])
+            args=json.loads(tc["function"]["arguments"])  # arguments 是 JSON 字符串，json.loads 转成 Python 字典后才能取参、传参
             print(f"  执行工具：{name}，参数：{args}")
-            result=tool_map[name](**args)
+            result=tool_map[name](**args)  # **args 拆包为关键字参数；此行即 ReAct 的 A(行动)：执行工具，返回值即观察结果
             messages.append({
                 "role":"tool",
-                "tool_call_id":tc["id"],
-                "content":json.dumps(result,ensure_ascii=False),
+                "tool_call_id":tc["id"],  # 回填模型下发的 tool_call_id：API 靠它把结果和对应调用对上
+                "content":json.dumps(result,ensure_ascii=False),  # json.dumps 序列化(与 resp.json() 相反)：content 只收字符串，故把结果转成 JSON；ensure_ascii=False 让中文不转义
             })
     else:
         print("\n超限，强制结束")
-
-    final = messages[-1].get("content", "")
+    final = messages[-1].get("content", "")  # 负索引取最后一条消息；.get("content","") 缺省返回空串，防止最后没内容时崩溃
     print(f"\n===== 最终答案 =====\n{final}")
     return final
-
 if __name__ == "__main__":
     parser=ArgumentParser(description="ReAct 工具调用Agent，支持时间查询、计算器、读本地文件、天气查询")
     parser.add_argument(
