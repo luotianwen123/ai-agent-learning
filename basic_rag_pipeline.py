@@ -1,3 +1,16 @@
+"""
+一个轻量级 RAG（检索增强生成）示例：
+将知识文档分块 -> 用 bge-small-zh 向量化 -> 按余弦相似度检索 TopK 片段 ->
+按 token 预算裁剪上下文后组装 prompt，调用 DeepSeek Chat API 生成回答。
+
+依赖安装：
+    pip install sentence-transformers tiktoken requests numpy python-dotenv
+
+运行：
+    1. 在 .env 中填入 OPENAI_API_KEY（DeepSeek 开放平台申请的 API Key）
+    2. python basic_rag_pipeline.py
+    3. 首次运行会自动下载向量模型 BAAI/bge-small-zh-v1.5
+"""
 from sentence_transformers import SentenceTransformer
 from dataclasses import dataclass
 import numpy as np

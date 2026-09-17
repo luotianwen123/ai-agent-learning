@@ -1,4 +1,4 @@
-from json import JSONDecodeError
+from argparse import ArgumentParser
 import requests
 import datetime
 import time
@@ -6,16 +6,14 @@ import json
 import os
 from functools import wraps
 from dotenv import load_dotenv
-
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL ="https://api.deepseek.com/chat/completions"
 MODEL="deepseek-chat"
-
-#当前工具都是本地操作，retry 主要面向未来的外部 API 工具
+# 当前工具都是本地操作，retry 主要面向未来的外部 API 工具
 def retry(func):
     @wraps(func)
-        def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs):
         last_error = None
         for i in range(3):
             try:
@@ -28,7 +26,6 @@ def retry(func):
                 time.sleep(i+1)
         return f"【{func.__name__}】重试 3 次仍失败：{last_error}"
     return wrapper
-
 @retry
 def get_current_time()->str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -42,13 +39,14 @@ def read_file(file_path:str)->str:
 @retry
 def get_weather(city:str)->str:
     resp=requests.get(f"https://wttr.in/{city}?format=j1",timeout=5)
-    resp.raise_for_status()
-    data:dict=resp.json()
+    resp.raise_for_status()  # 非 2xx 状态码立刻抛异常，避免拿错误的响应继续执行
+    data:dict=resp.json()  # 反序列化：JSON 文本→Python 字典/列表，之后才能按键取值
     temp=data["current_condition"][0]["temp_C"]
-    weatherDesc=data["current_condition"][0]["weatherDesc"][0]["value"]
-    return f"{city}:{temp}°C,{weatherDesc}"
-
-tools=[{"type":"function",
+    weatherdesc=data["current_condition"][0]["weatherDesc"][0]["value"]
+    return f"{city}:{temp}°C,{weatherdesc}"
+tools=[
+    {
+        "type":"function",
         "function":{
             "name":"get_current_time",
             "description":"获取当前系统时间，当用户询问现在几点、今天几号、当前日期时间时使用",
@@ -58,7 +56,9 @@ tools=[{"type":"function",
                 "required": []
             }
         }
-        },{"type": "function",
+    },
+    {
+        "type": "function",
         "function": {
             "name": "calculator",
             "description": "用于数学计算，当用户需要进行算术运算、表达式求值时使用",
@@ -91,7 +91,8 @@ tools=[{"type":"function",
             }
         }
     },
-       {"type": "function",
+    {
+        "type": "function",
         "function": {
             "name": "get_weather",
             "description":"查询指定城市的当前温度与天气，当用户询问某地天气时使用",
@@ -99,25 +100,29 @@ tools=[{"type":"function",
                 "type": "object",
                 "properties": {
                     "city":{
-                        "type": "string",
+                        "type":"string",
                         "description":"要查询天气的城市名"
                     }
                 },
                 "required": ["city"]
             }
         }
-        }
-       ]
-
+    }
+]
 # 工具名(字符串)→函数映射：模型只返回工具名，靠这张表翻译成真正可调用的函数
-tool_map ={"get_current_time":get_current_time,"calculator":calculator,"read_file":read_file,"get_weather":get_weather}
-
+tool_map ={
+    "get_current_time":get_current_time,
+    "calculator":calculator,
+    "read_file":read_file,
+    "get_weather":get_weather
+}
 def call_llm(messages):
     try:
-        body={"model":MODEL,
+        body={
+            "model":MODEL,
             "messages":messages,
             "tools":tools
-              }
+        }
         resp=requests.post(
             OPENAI_BASE_URL ,
             json=body,
@@ -132,10 +137,9 @@ def call_llm(messages):
     except Exception as e:  # 工具层只记录不处理，具体应对交给上层
         print(f"调用大模型失败：{e}")
         raise
-def run_agent(task):
-    # 消息历史是"列表套字典"：列表保存按顺序排列的每条消息；字典里 role 记谁说的、content 记内容
-    messages=[{"role":"user","content":task}]
-    max_steps=5
+DEFAULT_MAX_STEPS = 5
+def run_agent(task,max_steps=DEFAULT_MAX_STEPS):
+    messages=[{"role":"user","content":task}]  # 消息历史是"列表套字典"：列表保存按顺序排列的每条消息；字典里 role 记谁说的、content 记内容
     step=0
     while step<max_steps:
         step+=1
@@ -145,32 +149,42 @@ def run_agent(task):
         except Exception as e:
             print(f"调用大模型失败：{e}")
             break
-
-        # 追加而非覆盖：每轮回复接到历史尾部，下一轮模型才能读到完整上下文
-        messages.append(reply)
+        messages.append(reply)  # 追加而非覆盖：每轮回复接到历史尾部，下一轮模型才能读到完整上下文
         if reply["done"]:
             print("回答完毕")
             break
         # tool_calls 是列表：模型一轮可能同时请求多个工具调用，逐个遍历执行
         for tc in reply["tool_calls"]:
             name=tc["function"]["name"]
-            # arguments 是 JSON 字符串，json.loads 转成 Python 字典后才能取参、传参
-            args=json.loads(tc["function"]["arguments"])
+            args=json.loads(tc["function"]["arguments"])  # arguments 是 JSON 字符串，json.loads 转成 Python 字典后才能取参、传参
             print(f"  执行工具：{name}，参数：{args}")
-            # **args 拆包为关键字参数；此行即 ReAct 的 A(行动)：执行工具，返回值即观察结果
-            result=tool_map[name](**args)
+            result=tool_map[name](**args)  # **args 拆包为关键字参数；此行即 ReAct 的 A(行动)：执行工具，返回值即观察结果
             messages.append({
                 "role":"tool",
-                # 回填模型下发的 tool_call_id：API 靠它把结果和对应调用对上
-                "tool_call_id":tc["id"],
-                # json.dumps 序列化(与 resp.json() 相反)：content 只收字符串，故把结果转成 JSON；ensure_ascii=False 让中文不转义
-                "content":json.dumps(result,ensure_ascii=False),
+                "tool_call_id":tc["id"],  # 回填模型下发的 tool_call_id：API 靠它把结果和对应调用对上
+                "content":json.dumps(result,ensure_ascii=False),  # json.dumps 序列化(与 resp.json() 相反)：content 只收字符串，故把结果转成 JSON；ensure_ascii=False 让中文不转义
             })
-    if step>=max_steps:
+    else:
         print("\n超限，强制结束")
-    # 负索引取最后一条消息；.get("content","") 缺省返回空串，防止最后没内容时崩溃
-    final = messages[-1].get("content", "")
+    final = messages[-1].get("content", "")  # 负索引取最后一条消息；.get("content","") 缺省返回空串，防止最后没内容时崩溃
     print(f"\n===== 最终答案 =====\n{final}")
     return final
 if __name__ == "__main__":
-    run_agent("现在几点")
+    parser=ArgumentParser(description="ReAct 工具调用Agent，支持时间查询、计算器、读本地文件、天气查询")
+    parser.add_argument(
+        "question",
+        nargs="?",
+        default=None,
+        help="用户输入的问题"
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_MAX_STEPS, 
+        help="Agent最大推理轮次"
+    )
+    args = parser.parse_args()
+    if args.question is None:
+        parser.print_help()
+    else:
+        run_agent(args.question,max_steps=args.max_steps)
