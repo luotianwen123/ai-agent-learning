@@ -9,7 +9,7 @@
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
   - 💡 关键设计决策（原创优化）：`basic_rag_pipeline` 递归切分 overlap 防重复叠加设计
     - 传统递归分块存在缺陷：每一层递归都做 overlap 更叠上下文，递归越深，重叠内容叠加越多，最终文本大量冗余、失真。
-    - 我增设 **raw 标记参数**，做层级控制：
+    - 我增设 **_raw 标记参数**，做层级控制：
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `learning-log.md`：每日练习内容、技术卡点、Bug 复盘、次日学习计划，长期持续更新。
@@ -20,6 +20,99 @@
 - `tiktoken`
 - `requests`
 - `python-dotenv`
+
+---
+
+## 🚀 Quick Start
+
+### 1. 获取代码
+```bash
+git clone https://github.com/luotianwen123/ai-agent-learning.git
+cd ai-agent-learning
+```
+
+### 2. 环境准备
+建议 Python 3.9+。仓库未提供 `requirements.txt`，需手动安装以下依赖：
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv
+```
+
+### 3. 配置 API Key
+三个模块均调用 DeepSeek API（模型 `deepseek-chat`）。在项目根目录新建 `.env` 文件：
+
+```dotenv
+OPENAI_API_KEY=你的_DeepSeek_API_Key
+```
+
+> `.env`、`config.json`、`history.json` 均已在 `.gitignore` 中，不会被提交。
+
+### 4. 运行各模块
+
+**① `tool_agent.py` —— 手写 ReAct Agent（推荐先跑这个）**
+
+```bash
+# 直接提问
+python tool_agent.py "现在几点了？帮我算一下 (128 + 370) * 3"
+
+# 自定义最大推理轮次（默认 5）
+python tool_agent.py "北京现在天气怎么样？" --max-steps 8
+
+# 不传问题则打印帮助
+python tool_agent.py
+```
+
+内置 4 类工具：时间查询、计算器、本地文件读取、真实天气 API 请求。
+运行后会依次打印模型的思考、每次工具调用与回填结果，最后输出 `===== 最终答案 =====`。
+
+**② `basic_rag_pipeline.py` —— 手写完整 RAG 链路**
+
+```bash
+python basic_rag_pipeline.py
+```
+
+⚠️ 两点注意：
+- 首次运行会自动下载 embedding 模型 `BAAI/bge-small-zh-v1.5`（约 100MB），需要联网等待。
+- 当前为演示脚本，待检索的文档（`demo_doc`）和用户问题（`query`）写死在 `__main__` 中。想换内容直接改这两处变量即可。
+- 脚本会打印组装完成的完整 Prompt，并调用大模型输出最终回答。
+
+**③ `simple_agent_demo.py` —— 带持久化记忆的对话客户端**
+
+该模块从 `config.json` 读取配置（文件被 gitignore，需手动创建）：
+
+```json
+{
+  "agent_name": "学习助手",
+  "system_prompt": "你是一个耐心的 AI 学习助手。",
+  "api_key": "你的_DeepSeek_API_Key",
+  "api_url": "https://api.deepseek.com/chat/completions",
+  "max_history_len": 10
+}
+```
+
+然后运行：
+
+```bash
+python simple_agent_demo.py
+```
+
+- `max_history_len` 可选，默认 10，超出后自动截断最早的历史。
+- 对话中每轮都会把历史写入 `history.json`，下次启动可延续上下文。
+- 输入 `exit` 退出。
+
+### 5. 常见问题
+| 现象 | 原因与处理 |
+| --- | --- |
+| `OPENAI_API_KEY 未配置，请在 .env 文件中填写` | `.env` 缺失或变量名为 `OPENAI_API_KEY` 拼写有误 |
+| `配置文件不存在: config.json` | `simple_agent_demo.py` 未创建 `config.json`，见上方步骤 ③ |
+| 首次运行卡住 / 下载缓慢 | 正在拉取 embedding 模型，确认网络可访问 HuggingFace |
+| 调用报网络错误 | 脚本对临时性网络错误做了延迟重试；持续失败请检查 API Key 余额与网络代理 |
 
 ---
 
@@ -35,7 +128,7 @@
      原始装饰器对所有异常统一重试，导致参数错误、文件不存在等永远不会恢复的错误依旧重试，造成资源浪费与卡顿。
      解决：做异常分层。区分「永久性错误（语法、参数、文件不存在）直接终止返回」和「临时错误（网络波动）延迟重试」，精准控制重试逻辑。
    - **问题2：参数化配置暴露隐藏边界 Bug**
-     早期最大步数写死，模型一般2轮即可完成任务，边界问题从未暴露。新增 `max-steps` 可配置参数后，出现「模型正常完成任务仍提示超限」的误判。
+     早期最大步数写死，模型一般2轮即可完成任务，边界问题从未暴露。新增 `--max-steps` 可配置参数后，出现「模型正常完成任务仍提示超限」的误判。
      解决：使用 `while...else` 语法区分循环退出场景，精准区分「模型主动结束」和「步数超限被动结束」，修复边界误判。
      工程感悟：可配置化会把原本不可能触发的边界问题，变成用户可随时触发的显性问题，倒逼代码健壮性提升。
    - **问题3：不规范提交导致公共仓库代码损坏**
