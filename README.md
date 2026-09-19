@@ -24,67 +24,84 @@
 ---
 
 ## 🚀 Quick Start
+
 ### 1. 获取代码
 ```bash
-git clone [https://github.com/luotianwen123/ai-agent-learning.git](https://github.com/luotianwen123/ai-agent-learning.git)
+git clone https://github.com/luotianwen123/ai-agent-learning.git
 cd ai-agent-learning
 ```
 
 ### 2. 环境准备
 建议 Python 3.9+。仓库未提供 `requirements.txt`，需手动安装以下依赖：
+
 ```bash
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
 # macOS / Linux
 source .venv/bin/activate
+
 pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv
 ```
 
 ### 3. 配置 API Key
 三个模块均调用 DeepSeek API（模型 `deepseek-chat`）。在项目根目录新建 `.env` 文件：
+
 ```dotenv
 OPENAI_API_KEY=你的_DeepSeek_API_Key
 ```
+
 > `.env`、`config.json`、`history.json` 均已在 `.gitignore` 中，不会被提交。
 
 ### 4. 运行各模块
+
 **① `tool_agent.py` —— 手写 ReAct Agent（推荐先跑这个）**
+
 ```bash
 # 直接提问
 python tool_agent.py "现在几点了？帮我算一下 (128 + 370) * 3"
+
 # 自定义最大推理轮次（默认 5）
 python tool_agent.py "北京现在天气怎么样？" --max-steps 8
+
 # 不传问题则打印帮助
 python tool_agent.py
 ```
+
 内置 4 类工具：时间查询、计算器、本地文件读取、真实天气 API 请求。
 运行后会依次打印模型的思考、每次工具调用与回填结果，最后输出 `===== 最终答案 =====`。
 
 **② `basic_rag_pipeline.py` —— 手写完整 RAG 链路**
+
 ```bash
 python basic_rag_pipeline.py
 ```
+
 ⚠️ 两点注意：
 - 首次运行会自动下载 embedding 模型 `BAAI/bge-small-zh-v1.5`（约 100MB），需要联网等待。
 - 当前为演示脚本，待检索的文档（`demo_doc`）和用户问题（`query`）写死在 `__main__` 中。想换内容直接改这两处变量即可。
 - 脚本会打印组装完成的完整 Prompt，并调用大模型输出最终回答。
 
 **③ `simple_agent_demo.py` —— 带持久化记忆的对话客户端**
+
 该模块从 `config.json` 读取配置（文件被 gitignore，需手动创建）：
+
 ```json
 {
   "agent_name": "学习助手",
   "system_prompt": "你是一个耐心的 AI 学习助手。",
   "api_key": "你的_DeepSeek_API_Key",
-  "api_url": "[https://api.deepseek.com/chat/completions](https://api.deepseek.com/chat/completions)",
+  "api_url": "https://api.deepseek.com/chat/completions",
   "max_history_len": 10
 }
 ```
+
 然后运行：
+
 ```bash
 python simple_agent_demo.py
 ```
+
 - `max_history_len` 可选，默认 10，超出后自动截断最早的历史。
 - 对话中每轮都会把历史写入 `history.json`，下次启动可延续上下文。
 - 输入 `exit` 退出。
@@ -145,4 +162,3 @@ python simple_agent_demo.py
 
 4. **迭代优化思路**
 当前全部指标自测通过。后续将递归切分改为迭代栈实现，解决超长文本递归深度溢出风险；补齐文档注释，固化测试用例。
-```
