@@ -1,4 +1,4 @@
-#**messages 是追加；
+#messages 是追加；
 #但这不是默认行为，是因为加了 Annotated[list, add_messages] 才变成追加。
 #如果去掉这个注解，LangGraph 会默认直接覆盖。
 #tool_agent.py 里不用是因为我手动在每一轮更新对话后加入messages信息
