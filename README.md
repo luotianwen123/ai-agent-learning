@@ -12,7 +12,7 @@
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
-- `learning-log.md`：每日练习内容、技术卡点、Bug 复盘、次日学习计划，长期持续更新。
+
 
 ### 📦 项目依赖
 - `sentence-transformers>=2.7.0`
