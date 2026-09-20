@@ -12,7 +12,7 @@
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
-
+- `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前：LangGraph 三练）
 
 ### 📦 项目依赖
 - `sentence-transformers>=2.7.0`
