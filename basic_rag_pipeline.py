@@ -11,17 +11,17 @@
     2. python basic_rag_pipeline.py
     3. 首次运行会自动下载向量模型 BAAI/bge-small-zh-v1.5
 """
+import os
+from dotenv import load_dotenv
+load_dotenv()
 from sentence_transformers import SentenceTransformer
 from dataclasses import dataclass
 import numpy as np
 import tiktoken
 import requests
 import json
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
+
 if not API_KEY:
     raise ValueError("OPENAI_API_KEY 未配置，请在 .env 文件中填写")
 BASE_URL = "https://api.deepseek.com/chat/completions"
