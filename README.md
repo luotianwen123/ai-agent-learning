@@ -12,7 +12,7 @@
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
-- `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前：LangGraph 三练）
+- `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）
 
 ### 📦 项目依赖
 - `sentence-transformers>=2.7.0`
@@ -49,6 +49,8 @@ pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests pyt
 
 ```dotenv
 OPENAI_API_KEY=你的_DeepSeek_API_Key
+# 可选：国内直连 HuggingFace 缓慢时走镜像（basic_rag_pipeline.py 首次运行要下模型）
+HF_ENDPOINT=https://hf-mirror.com
 ```
 
 > `.env`、`config.json`、`history.json` 均已在 `.gitignore` 中，不会被提交。
@@ -77,8 +79,9 @@ python tool_agent.py
 python basic_rag_pipeline.py
 ```
 
-⚠️ 两点注意：
-- 首次运行会自动下载 embedding 模型 `BAAI/bge-small-zh-v1.5`（约 100MB），需要联网等待。
+⚠️ 四点注意：
+- 首次运行会自动下载 embedding 模型 `BAAI/bge-small-zh-v1.5`（约 100MB），需要联网等待。国内网络慢时，在 `.env` 里配 `HF_ENDPOINT=https://hf-mirror.com` 走镜像。
+- **`.env` 必须在所有第三方库 import 之前加载**：`huggingface_hub` 在模块导入时就会读取 `HF_ENDPOINT` 并存入常量，之后才调 `load_dotenv()` 已经太晚，镜像不会生效。调整 import 顺序时别把这个先后关系弄反。
 - 当前为演示脚本，待检索的文档（`demo_doc`）和用户问题（`query`）写死在 `__main__` 中。想换内容直接改这两处变量即可。
 - 脚本会打印组装完成的完整 Prompt，并调用大模型输出最终回答。
 
@@ -111,7 +114,8 @@ python simple_agent_demo.py
 | --- | --- |
 | `OPENAI_API_KEY 未配置，请在 .env 文件中填写` | `.env` 缺失或变量名为 `OPENAI_API_KEY` 拼写有误 |
 | `配置文件不存在: config.json` | `simple_agent_demo.py` 未创建 `config.json`，见上方步骤 ③ |
-| 首次运行卡住 / 下载缓慢 | 正在拉取 embedding 模型，确认网络可访问 HuggingFace |
+| 首次运行卡住 / 下载缓慢 | 正在拉取 embedding 模型。直连 HuggingFace 慢时在 `.env` 配置 `HF_ENDPOINT=https://hf-mirror.com` 走镜像；注意 `load_dotenv()` 必须排在第三方库 import 之前才会生效 |
+| 已配 `HF_ENDPOINT` 但仍在直连 HuggingFace | import 顺序反了，见运行步骤 ② 的第 2 条注意 |
 | 调用报网络错误 | 脚本对临时性网络错误做了延迟重试；持续失败请检查 API Key 余额与网络代理 |
 
 ---
