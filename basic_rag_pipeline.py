@@ -130,6 +130,32 @@ def check_boundary(chunks: list[str], separators: list[str]) -> tuple[int, int, 
     return bad_count, checked, bad_index
 
 
+# ==================== 新增：分块无损校验函数 ====================
+def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool, int, int]:
+    """
+    去掉每个块的前缀重叠后拼接还原，与原文比对验证无信息丢失
+    :param chunks: 带重叠的分块结果
+    :param original: 原始完整文本
+    :param overlap: 分块重叠长度
+    :return: (是否完全一致, 还原后文本长度, 原文长度)
+    """
+    # 【已知问题·overlap=0】prev[-0:] == prev[0:] 会取到整个前一块 → 块1 开头多塞块0 全文
+    #   实测：overlap=0 → 还原 263 / 原文 230（多 33 字）
+    #   同时 check_no_loss 的 chunk[overlap:] 在 overlap=0 时也不剁，还原式自己失效
+    #   校验网格覆盖：mcs<=0 ✓ / overlap<0 ✓ / overlap>=mcs ✓ / **overlap==0 是空格**
+    if not chunks:
+        restored = ""
+    else:
+        # 第一块完整保留，后续块去掉前缀重叠部分，拼接还原全文
+        restored_parts = [chunks[0]]
+        for chunk in chunks[1:]:
+            restored_parts.append(chunk[overlap:])
+        restored = "".join(restored_parts)
+
+    is_equal = (restored == original)
+    return is_equal, len(restored), len(original)
+
+
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     a = np.array(vec_a)
     b = np.array(vec_b)
@@ -246,6 +272,15 @@ if __name__ == "__main__":
     print(f"【分块边界校验】不合格数: {bad_cnt} | 检查块数: {checked_num} | 坏块下标: {bad_idx_list}")
     # 三元组整体断言：所有非末尾块都必须以合法分隔符结尾
     assert boundary_result == (0, checked_num, []), f"分块边界校验不通过，实际结果：{boundary_result}"
+
+    # ========== 新增：分块无损校验 ==========
+    no_loss_result = check_no_loss(chunks, demo_doc, 30)
+    # ① 哨兵断言：块数必须 > 1，否则这个检查也是空跑
+    assert len(chunks) > 1, "无损校验空跑：分块后仅1块，无法验证重叠还原逻辑"
+    # ② 断言还原结果与原文完全一致，报错携带长度对比
+    assert no_loss_result[0], f"分块无损校验失败：还原后长度 {no_loss_result[1]} / 原文长度 {no_loss_result[2]}"
+
+    print(f"【分块无损校验】还原一致: {no_loss_result[0]} | 还原长度: {no_loss_result[1]} | 原文长度: {no_loss_result[2]}")
 
     vector_store: list[ChunkItem] = []
     for c in chunks:
