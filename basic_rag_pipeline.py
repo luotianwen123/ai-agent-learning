@@ -147,13 +147,45 @@ def check_boundary(chunks: list[str], separators: list[str]) -> tuple[int, int, 
     bad_count = len(bad_index)
     return bad_count, checked, bad_index
 
-def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool, int, int]:
+def first_diff_index(text_a: str, text_b: str) -> int:
+    """
+    找出两个字符串首个不同的字符下标
+    :return: 首个差异下标；完全相同返回 -1；前缀一致仅长度不同时，返回较短串长度
+    """
+    for i, (ca, cb) in enumerate(zip(text_a, text_b)):
+        if ca != cb:
+            return i
+    # 走到这里说明公共前缀完全一致，差异只剩长度
+    if len(text_a) != len(text_b):
+        return min(len(text_a), len(text_b))
+    return -1
+
+def format_first_diff(restored: str, original: str, diff_index: int) -> str:
+    """
+    把首个差异位置渲染成可直接读的说明：截取差异点前后各 8 字对照，便于肉眼定位
+    :param restored: 还原出的文本
+    :param original: 原文
+    :param diff_index: first_diff_index 的返回值，-1 表示无差异
+    :return: 形如「第 47 字：还原「…abc」/ 原文「…abd」」；无差异时返回「无差异」
+    """
+    if diff_index < 0:
+        return "无差异"
+    span = 8
+    start = max(0, diff_index - span)
+    # 差异点落在某一侧末尾之外：本质是「谁更长」，直接点名多出 / 缺少的内容
+    if diff_index >= len(original):
+        return f"第 {diff_index} 字起：原文已结束，还原仍多出「{restored[diff_index:diff_index + span]}」"
+    if diff_index >= len(restored):
+        return f"第 {diff_index} 字起：还原已结束，原文尚余「{original[diff_index:diff_index + span]}」"
+    return f"第 {diff_index} 字：还原「{restored[start:diff_index + span]}」/ 原文「{original[start:diff_index + span]}」"
+
+def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool, int, int, str]:
     """
     去掉每个块的前缀重叠后拼接还原，与原文比对验证无信息丢失
     :param chunks: 带重叠的分块结果
     :param original: 原始完整文本
     :param overlap: 分块重叠长度
-    :return: (是否完全一致, 还原后文本长度, 原文长度)
+    :return: (是否完全一致, 还原后文本长度, 原文长度, 首个差异说明，一致时为「无差异」)
     """
     # 【已知问题·overlap=0】prev[-0:] == prev[0:] 会取到整个前一块 → 块1 开头多塞块0 全文
     #   实测：overlap=0 → 还原 263 / 原文 230（多 33 字）
@@ -169,7 +201,9 @@ def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool,
         restored = "".join(restored_parts)
 
     is_equal = (restored == original)
-    return is_equal, len(restored), len(original)
+    # 补首个差异说明：原先只回两个长度，碰到「长度相同但内容不同」会报出两个一模一样的数字，看不出问题
+    diff_desc = format_first_diff(restored, original, first_diff_index(restored, original))
+    return is_equal, len(restored), len(original), diff_desc
 
 def check_overlap_consistency(chunks: list[str], overlap: int) -> tuple[bool, int, list[int]]:
     """
@@ -326,13 +360,14 @@ if __name__ == "__main__":
     assert overlap_ok, f"重叠一致性校验失败，不匹配块对下标：{overlap_bad_idx} | 本次的overlap参数:{overlap}"
 
     # ========== 分块无损校验 ==========
-    no_loss_result = check_no_loss(chunks, demo_doc,overlap=overlap)
+    no_loss_result = check_no_loss(chunks, demo_doc, overlap=overlap)
+    no_loss_ok, restored_len, origin_len, diff_desc = no_loss_result
     # ① 哨兵断言：块数必须 > 1，否则这个检查也是空跑
     assert len(chunks) > 1, "无损校验空跑：分块后仅1块，无法验证重叠还原逻辑"
-    # ② 断言还原结果与原文完全一致，报错携带长度对比
-    assert no_loss_result[0], f"分块无损校验失败：还原后长度 {no_loss_result[1]} | 原文长度 {no_loss_result[2]} | 本次的overlap参数:{overlap}"
+    # ② 断言还原结果与原文完全一致，报错带上首个差异位置及其前后文，避免只报长度时定位不到
+    assert no_loss_ok, f"分块无损校验失败：{diff_desc} | 还原后长度 {restored_len} | 原文长度 {origin_len} | 本次的overlap参数:{overlap}"
 
-    print(f"【分块无损校验】还原一致: {no_loss_result[0]} | 还原长度: {no_loss_result[1]} | 原文长度: {no_loss_result[2]} | 本次的overlap参数:{overlap}")
+    print(f"【分块无损校验】还原一致: {no_loss_ok} | 首个差异: {diff_desc} | 还原长度: {restored_len} | 原文长度: {origin_len} | 本次的overlap参数:{overlap}")
 
     vector_store: list[ChunkItem] = []
     for c in chunks:
