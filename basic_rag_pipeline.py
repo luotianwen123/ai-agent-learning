@@ -112,6 +112,24 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             result.append(new_chunk)
     return result
 
+def check_max_chunk(chunks: list[str], max_chunk_size: int,) -> tuple[bool, int, str]:
+    """
+    校验所有分块的字符长度是否不超过设定上限
+    :param chunks: 待校验文本块列表
+    :param max_chunk_size: 单块最大字符数上限
+    :return: (是否校验通过, 最长块字符数量, 最长块文本内容)
+    """
+    # 获取所有块里最大字符长度
+    max_chunk_num = max(len(w) for w in chunks)
+    # 找到对应最长文本
+    max_chunk_text = ""
+    for text in chunks:
+        if len(text) == max_chunk_num:
+            max_chunk_text = text
+    # 判断是否超限，返回结果元组
+    if max_chunk_num > max_chunk_size:
+        return False, max_chunk_num, max_chunk_text
+    return True, max_chunk_num, max_chunk_text
 
 def check_boundary(chunks: list[str], separators: list[str]) -> tuple[int, int, list[int]]:
     """
@@ -129,8 +147,6 @@ def check_boundary(chunks: list[str], separators: list[str]) -> tuple[int, int, 
     bad_count = len(bad_index)
     return bad_count, checked, bad_index
 
-
-# ==================== 新增：分块无损校验函数 ====================
 def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool, int, int]:
     """
     去掉每个块的前缀重叠后拼接还原，与原文比对验证无信息丢失
@@ -155,6 +171,27 @@ def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool,
     is_equal = (restored == original)
     return is_equal, len(restored), len(original)
 
+def check_overlap_consistency(chunks: list[str], overlap: int) -> tuple[bool, int, list[int]]:
+    """
+    校验相邻块之间重叠区域一致性
+    规则：第i块(A)末尾overlap个字符，必须等于第i+1块(B)开头overlap个字符
+    :param chunks: 带重叠的文本分块列表
+    :param overlap: 设定的重叠字符长度
+    :return: (是否全部重叠合法, 错误的相邻块对总数, 出错块对下标列表)
+        注意：返回的下标i代表 chunks[i] 和 chunks[i+1] 这一对校验失败
+    """
+    bad_pair_idx = []
+    for i, chunk_a in enumerate(chunks[:-1]):
+        chunk_b = chunks[i+1]
+        # A末尾取出overlap长度字符
+        tail_a = chunk_a[-overlap:]
+        # B开头取出overlap长度字符
+        head_b = chunk_b[:overlap]
+        if tail_a != head_b:
+            bad_pair_idx.append(i)
+    bad_count = len(bad_pair_idx)
+    all_ok = (bad_count == 0)
+    return all_ok, bad_count, bad_pair_idx
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     a = np.array(vec_a)
@@ -259,28 +296,43 @@ demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读�
 if __name__ == "__main__":
     model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     tokenizer = tiktoken.get_encoding("cl100k_base")
+    max_chunk_size = 150
+    overlap = 30
+    chunks = recursive_split(demo_doc, max_chunk_size=max_chunk_size, overlap=overlap)
 
-    chunks = recursive_split(demo_doc, max_chunk_size=150, overlap=30)
+    # ========== 最大分块字符长度校验 ==========
+    is_ok, max_chunk_num, max_chunk_text = check_max_chunk(chunks, max_chunk_size=max_chunk_size)
+    #【断言】:最长块不能超过设定字符上限，失败抛出提示
+    assert is_ok, f"【最大分块字数校验失败】最长块长度:{max_chunk_num}, 超过上限{max_chunk_size}"
+    print(f"【最大分块字数】最长块字符数: {max_chunk_num}, 未超过上限{max_chunk_size}")
 
     # ========== 分块边界校验 ==========
     boundary_result = check_boundary(chunks, SEPARATORS)
     bad_cnt, checked_num, bad_idx_list = boundary_result
 
-    # 【哨兵断言】确保测试有效：必须真的检查到了块，禁止空跑（只分出1块的无效场景）
+    #【哨兵断言】确保测试有效：必须真的检查到了块，禁止空跑（只分出1块的无效场景）
     assert checked_num > 0, "测试无效：分块后仅1块，未触发任何边界检查，请调小max_chunk_size或加长测试文本"
 
     print(f"【分块边界校验】不合格数: {bad_cnt} | 检查块数: {checked_num} | 坏块下标: {bad_idx_list}")
-    # 三元组整体断言：所有非末尾块都必须以合法分隔符结尾
-    assert boundary_result == (0, checked_num, []), f"分块边界校验不通过，实际结果：{boundary_result}"
+    # 【哨兵断言】:所有非末尾块都必须以合法分隔符结尾
+    assert boundary_result == (0, checked_num, []), f"分块边界校验不通过，实际结果：{boundary_result},本次分隔符为{SEPARATORS}"
 
-    # ========== 新增：分块无损校验 ==========
-    no_loss_result = check_no_loss(chunks, demo_doc, 30)
+    # ========== 重叠区域一致性校验 ==========
+    # 哨兵断言：少于2块不存在相邻对，本项校验无意义，禁止空跑
+    assert len(chunks) > 1, "重叠一致性校验空跑：分块后仅1块，无相邻块对可校验"
+    overlap_ok, overlap_bad_cnt, overlap_bad_idx = check_overlap_consistency(chunks, overlap)
+    print(f"【重叠一致性校验】不匹配对数: {overlap_bad_cnt} | 坏块对下标: {overlap_bad_idx} | 本次的overlap参数:{overlap}")
+    # 断言：所有相邻块重叠区域必须完全匹配
+    assert overlap_ok, f"重叠一致性校验失败，不匹配块对下标：{overlap_bad_idx} | 本次的overlap参数:{overlap}"
+
+    # ========== 分块无损校验 ==========
+    no_loss_result = check_no_loss(chunks, demo_doc,overlap=overlap)
     # ① 哨兵断言：块数必须 > 1，否则这个检查也是空跑
     assert len(chunks) > 1, "无损校验空跑：分块后仅1块，无法验证重叠还原逻辑"
     # ② 断言还原结果与原文完全一致，报错携带长度对比
-    assert no_loss_result[0], f"分块无损校验失败：还原后长度 {no_loss_result[1]} / 原文长度 {no_loss_result[2]}"
+    assert no_loss_result[0], f"分块无损校验失败：还原后长度 {no_loss_result[1]} | 原文长度 {no_loss_result[2]} | 本次的overlap参数:{overlap}"
 
-    print(f"【分块无损校验】还原一致: {no_loss_result[0]} | 还原长度: {no_loss_result[1]} | 原文长度: {no_loss_result[2]}")
+    print(f"【分块无损校验】还原一致: {no_loss_result[0]} | 还原长度: {no_loss_result[1]} | 原文长度: {no_loss_result[2]} | 本次的overlap参数:{overlap}")
 
     vector_store: list[ChunkItem] = []
     for c in chunks:
