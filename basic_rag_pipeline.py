@@ -119,14 +119,11 @@ def check_max_chunk(chunks: list[str], max_chunk_size: int,) -> tuple[bool, int,
     :param max_chunk_size: 单块最大字符数上限
     :return: (是否校验通过, 最长块字符数量, 最长块文本内容)
     """
-    # 获取所有块里最大字符长度
     max_chunk_num = max(len(w) for w in chunks)
-    # 找到对应最长文本
     max_chunk_text = ""
     for text in chunks:
         if len(text) == max_chunk_num:
             max_chunk_text = text
-    # 判断是否超限，返回结果元组
     if max_chunk_num > max_chunk_size:
         return False, max_chunk_num, max_chunk_text
     return True, max_chunk_num, max_chunk_text
@@ -136,9 +133,8 @@ def check_boundary(chunks: list[str], separators: list[str]) -> tuple[int, int, 
     校验分块结尾是否为合法分隔符（排除最后一块，最后一块允许不完整）
     :return: (不合格块数量, 已检查块总数, 不合格块下标列表)
     """
-    bad_index = []  # 装不合格块的下标
-    checked = 0     # 一共检查了几块
-    # 排除最后一块，直接切片 chunks[:-1] 遍历
+    bad_index = []
+    checked = 0
     for i, chunk in enumerate(chunks[:-1]):
         checked += 1
         # 修复endswith的坑：必须传元组，不能传列表，否则报TypeError
@@ -155,7 +151,6 @@ def first_diff_index(text_a: str, text_b: str) -> int:
     for i, (ca, cb) in enumerate(zip(text_a, text_b)):
         if ca != cb:
             return i
-    # 走到这里说明公共前缀完全一致，差异只剩长度
     if len(text_a) != len(text_b):
         return min(len(text_a), len(text_b))
     return -1
@@ -194,7 +189,6 @@ def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool,
     if not chunks:
         restored = ""
     else:
-        # 第一块完整保留，后续块去掉前缀重叠部分，拼接还原全文
         restored_parts = [chunks[0]]
         for chunk in chunks[1:]:
             restored_parts.append(chunk[overlap:])
@@ -217,9 +211,7 @@ def check_overlap_consistency(chunks: list[str], overlap: int) -> tuple[bool, in
     bad_pair_idx = []
     for i, chunk_a in enumerate(chunks[:-1]):
         chunk_b = chunks[i+1]
-        # A末尾取出overlap长度字符
         tail_a = chunk_a[-overlap:]
-        # B开头取出overlap长度字符
         head_b = chunk_b[:overlap]
         if tail_a != head_b:
             bad_pair_idx.append(i)
@@ -324,7 +316,6 @@ def llm_chat(
         raise RuntimeError(f"网络请求异常：{str(e)}")
 
 
-# ========== 纯连续无换行测试文本：200字以上、全句号分隔、末尾以句号结尾 ==========
 demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。RAG检索增强生成，通过知识库检索，给大模型补充外部资料，减少幻觉。文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息，分块过小丢失完整语义。递归切分是常见的语义分块方案，它会优先按照标点、段落等语义边界逐级拆分文本，在保证单块长度不超限的前提下尽可能保留语义完整性。重叠机制则用于缓解分块处的上下文断裂问题，让相邻块之间保留一段公共内容，避免关键信息刚好落在切分线上被截断。"""
 
 if __name__ == "__main__":
@@ -334,13 +325,10 @@ if __name__ == "__main__":
     overlap = 30
     chunks = recursive_split(demo_doc, max_chunk_size=max_chunk_size, overlap=overlap)
 
-    # ========== 最大分块字符长度校验 ==========
     is_ok, max_chunk_num, max_chunk_text = check_max_chunk(chunks, max_chunk_size=max_chunk_size)
-    #【断言】:最长块不能超过设定字符上限，失败抛出提示
     assert is_ok, f"【最大分块字数校验失败】最长块长度:{max_chunk_num}, 超过上限{max_chunk_size}"
     print(f"【最大分块字数】最长块字符数: {max_chunk_num}, 未超过上限{max_chunk_size}")
 
-    # ========== 分块边界校验 ==========
     boundary_result = check_boundary(chunks, SEPARATORS)
     bad_cnt, checked_num, bad_idx_list = boundary_result
 
@@ -348,18 +336,14 @@ if __name__ == "__main__":
     assert checked_num > 0, "测试无效：分块后仅1块，未触发任何边界检查，请调小max_chunk_size或加长测试文本"
 
     print(f"【分块边界校验】不合格数: {bad_cnt} | 检查块数: {checked_num} | 坏块下标: {bad_idx_list}")
-    # 【哨兵断言】:所有非末尾块都必须以合法分隔符结尾
     assert boundary_result == (0, checked_num, []), f"分块边界校验不通过，实际结果：{boundary_result},本次分隔符为{SEPARATORS}"
 
-    # ========== 重叠区域一致性校验 ==========
     # 哨兵断言：少于2块不存在相邻对，本项校验无意义，禁止空跑
     assert len(chunks) > 1, "重叠一致性校验空跑：分块后仅1块，无相邻块对可校验"
     overlap_ok, overlap_bad_cnt, overlap_bad_idx = check_overlap_consistency(chunks, overlap)
     print(f"【重叠一致性校验】不匹配对数: {overlap_bad_cnt} | 坏块对下标: {overlap_bad_idx} | 本次的overlap参数:{overlap}")
-    # 断言：所有相邻块重叠区域必须完全匹配
     assert overlap_ok, f"重叠一致性校验失败，不匹配块对下标：{overlap_bad_idx} | 本次的overlap参数:{overlap}"
 
-    # ========== 分块无损校验 ==========
     no_loss_result = check_no_loss(chunks, demo_doc, overlap=overlap)
     no_loss_ok, restored_len, origin_len, diff_desc = no_loss_result
     # ① 哨兵断言：块数必须 > 1，否则这个检查也是空跑

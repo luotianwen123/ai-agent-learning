@@ -40,7 +40,7 @@ def read_file(file_path:str)->str:
 def get_weather(city:str)->str:
     resp=requests.get(f"https://wttr.in/{city}?format=j1",timeout=5)
     resp.raise_for_status()  # 非 2xx 状态码立刻抛异常，避免拿错误的响应继续执行
-    data:dict=resp.json()  # 反序列化：JSON 文本→Python 字典/列表，之后才能按键取值
+    data:dict=resp.json()
     temp=data["current_condition"][0]["temp_C"]
     weatherdesc=data["current_condition"][0]["weatherDesc"][0]["value"]
     return f"{city}:{temp}°C,{weatherdesc}"
@@ -130,8 +130,8 @@ def call_llm(messages):
             timeout=30,
         )
         resp.raise_for_status()  # 非 2xx 状态码立刻抛异常，避免拿错误的响应继续执行
-        data=resp.json()  # 反序列化：JSON 文本→Python 字典/列表，之后才能按键取值
-        reply=data["choices"][0]["message"]  # 嵌套取值：choices 是列表(可能有多个候选)，取第一个的 message
+        data=resp.json()
+        reply=data["choices"][0]["message"]
         reply["done"]=not reply.get("tool_calls")  # 自定义终止开关：没有工具调用则结束循环；tool_calls 是可选键(想调工具时才存在)，用 .get() 避免 KeyError
         return reply
     except Exception as e:  # 工具层只记录不处理，具体应对交给上层
@@ -139,7 +139,7 @@ def call_llm(messages):
         raise
 DEFAULT_MAX_STEPS = 5
 def run_agent(task,max_steps=DEFAULT_MAX_STEPS):
-    messages=[{"role":"user","content":task}]  # 消息历史是"列表套字典"：列表保存按顺序排列的每条消息；字典里 role 记谁说的、content 记内容
+    messages=[{"role":"user","content":task}]
     step=0
     while step<max_steps:
         step+=1
@@ -156,7 +156,7 @@ def run_agent(task,max_steps=DEFAULT_MAX_STEPS):
         # tool_calls 是列表：模型一轮可能同时请求多个工具调用，逐个遍历执行
         for tc in reply["tool_calls"]:
             name=tc["function"]["name"]
-            args=json.loads(tc["function"]["arguments"])  # arguments 是 JSON 字符串，json.loads 转成 Python 字典后才能取参、传参
+            args=json.loads(tc["function"]["arguments"])
             print(f"  执行工具：{name}，参数：{args}")
             result=tool_map[name](**args)  # **args 拆包为关键字参数；此行即 ReAct 的 A(行动)：执行工具，返回值即观察结果
             messages.append({
