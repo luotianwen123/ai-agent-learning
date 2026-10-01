@@ -1,5 +1,5 @@
 """
-tool_agent_lg.py
+tool_agent_langgraph.py
 基于LangGraph StateGraph实现的完整ReAct工具调用Agent
 复用 tool_agent.py 中全部工具定义、工具映射、重试装饰器与最大步数配置
 使用 LangChain ChatOpenAI 客户端对接 DeepSeek 大模型，通过状态图实现自动推理循环
@@ -17,10 +17,10 @@ from langgraph.graph.message import add_messages
 
 from tool_agent import tools, tool_map, DEFAULT_MAX_STEPS
 
-
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     step: int
+    finish_reason: str
 
 
 def call_llm(messages):
@@ -76,34 +76,55 @@ def tool_node(state: AgentState) -> dict:
 def route_agent(state: AgentState) -> str:
     """
     Agent 节点出口路由函数：判断下一步走向
-    返回值对应 path_map 中的键：
-    - "end": 终止运行（推理完成或步数超限）
-    - "tools": 进入工具节点执行调用
+    返回值对应 path_map 中的三个键：
+    - "done":       模型不再发起工具调用，推理正常完成
+    - "over_limit": 步数达到上限，强制终止
+    - "tools":      继续进入工具节点执行调用
     """
     last_msg = state["messages"][-1]
     # 终止条件1：模型没有发起工具调用，推理已完成
     if not last_msg.tool_calls:
-        return "end"
+        return "done"
     # 终止条件2：已达到最大推理步数，强制终止
     if state["step"] >= DEFAULT_MAX_STEPS:
-        return "end"
+        return "over_limit"
     # 继续循环：执行工具后回到下一轮推理
     return "tools"
+
+
+def finish_done(state: AgentState) -> dict:
+    print("=====正常结束：模型已给出最终回答=====")
+    return {"finish_reason": "正常结束：模型不再请求工具，推理已完成"}
+
+
+def finish_over_limit(state: AgentState) -> dict:
+    print(f"===== 超限结束：推理步数达到上限 {DEFAULT_MAX_STEPS} =====")
+    return {"finish_reason": f"超限结束：步数达到上限 {DEFAULT_MAX_STEPS}，被强制终止"}
 
 
 graph = StateGraph(AgentState)
 graph.add_node("agent", agent_node)
 graph.add_node("tools", tool_node)
+graph.add_node("finish_done", finish_done)
+graph.add_node("finish_over_limit", finish_over_limit)
+
+
 graph.add_edge(START, "agent")
+
+
 graph.add_conditional_edges(
     source="agent",
     path=route_agent,
     path_map={
-        "end": END,
+        "done": "finish_done",
+        "over_limit": "finish_over_limit",
         "tools": "tools"
     }
 )
 graph.add_edge("tools", "agent")
+graph.add_edge("finish_done", END)
+graph.add_edge("finish_over_limit", END)
+
 app = graph.compile()
 
 
@@ -111,7 +132,8 @@ if __name__ == "__main__":
     # 初始状态必须显式给 step=0，否则 agent_node 取值会报 KeyError
     initial_state = {
         "messages": [{"role": "user", "content": "现在几点？"}],
-        "step": 0
+        "step": 0,
+        "finish_reason":""
     }
 
     # 一键 invoke 执行完整循环，替代原来的手动逐节点调用
@@ -120,5 +142,6 @@ if __name__ == "__main__":
     print("=== 最终状态统计 ===")
     print(f"总消息条数: {len(final_state['messages'])}")
     print(f"总推理步数: {final_state['step']}")
+    print(f"结束原因: {final_state['finish_reason']}")
     print("\n=== 模型最终回答 ===")
     print(final_state["messages"][-1].content)
