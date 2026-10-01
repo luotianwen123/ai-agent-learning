@@ -12,6 +12,7 @@
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
+- `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环
 - `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）
 
 ### 📦 项目依赖
@@ -20,6 +21,8 @@
 - `tiktoken`
 - `requests`
 - `python-dotenv`
+- `langchain-openai`
+- `langgraph`
 
 ---
 
@@ -41,11 +44,11 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv
+pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv langchain-openai langgraph
 ```
 
 ### 3. 配置 API Key
-三个模块均调用 DeepSeek API（模型 `deepseek-chat`）。在项目根目录新建 `.env` 文件：
+四个模块均调用 DeepSeek API（模型 `deepseek-chat`）。在项目根目录新建 `.env` 文件：
 
 ```dotenv
 OPENAI_API_KEY=你的_DeepSeek_API_Key
@@ -109,6 +112,14 @@ python simple_agent_demo.py
 - 对话中每轮都会把历史写入 `history.json`，下次启动可延续上下文。
 - 输入 `exit` 退出。
 
+**④ `tool_agent_langgraph.py` —— LangGraph 版 ReAct Agent**
+
+```bash
+python tool_agent_langgraph.py
+```
+
+复用 `tool_agent.py` 的全部工具定义、工具映射、重试装饰器与最大步数配置，改用 LangGraph `StateGraph` 搭建推理循环：`messages` 用 `Annotated[list, add_messages]` 让框架自动追加、`route_agent` 条件边判断「继续调工具 / 终止」。需额外安装 `langchain-openai`、`langgraph`。
+
 ### 5. 常见问题
 | 现象 | 原因与处理 |
 | --- | --- |
@@ -121,7 +132,7 @@ python simple_agent_demo.py
 ---
 
 ## ✨ 项目深度复盘（简历 / 面试 完整版）
-> 更新时间：2026-09-16 | 素材来源：真实 Git 提交记录 + 本地版本比对，无虚构、可核验
+> 更新时间：2026-10-01 | 素材来源：真实 Git 提交记录 + 本地版本比对，无虚构、可核验
 
 ### 项目一：`tool_agent.py` | 无框架手写 ReAct Agent
 1. **实现内容**
@@ -187,3 +198,20 @@ python simple_agent_demo.py
 
 4. **迭代优化思路**
 第 1、2、3、5 项验收指标已落地（第 1、2、5 项含反向验证）。后续将递归切分改为迭代栈实现，解决超长文本递归深度溢出风险；补齐文档注释，固化测试用例；补上 `overlap=0` 的覆盖，并把第 4 项指标从计划补成代码。
+
+---
+
+### 项目三：`tool_agent_langgraph.py` | LangGraph 版 ReAct Agent
+1. **实现内容**
+在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：两个节点（`agent_node` 推理、`tool_node` 执行工具）+ 一条条件边（`route_agent`），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。
+
+2. **核心问题与解决思路**
+   - **问题1：消息历史手动拼容易出错**
+     项目一里每轮手动 `messages.append(...)` 维护完整历史；LangGraph 版声明 `Annotated[list, add_messages]`，节点只返回本轮增量消息，框架自动追加进历史，不用再手动拼列表。
+   - **问题2：循环终止条件要显式落地成边**
+     手写版靠 `while...else` 区分「模型主动结束 / 步数超限」；LangGraph 版把这两个终止条件收进 `route_agent` 条件边——无工具调用或达到 `DEFAULT_MAX_STEPS` 时返回 `"end"`，否则返回 `"tools"` 进入工具节点、再回到推理节点，形成「推理-行动-观察」闭环。
+   - **问题3：初始状态缺字段会抛 KeyError**
+     `agent_node` 会读 `state["step"]`，所以 `__main__` 里初始状态必须显式给 `step=0`，否则取值时报 KeyError。
+
+3. **项目总结**
+工具层零改动，只替换「调度循环」这一层：手写 `while` 循环 → 框架状态图。两者对照能讲清 ReAct 的核心是「推理-行动-观察」闭环，具体用循环还是状态图实现是次要的。
