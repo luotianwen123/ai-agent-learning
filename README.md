@@ -132,7 +132,7 @@ python tool_agent_langgraph.py
 ---
 
 ## ✨ 项目深度复盘（简历 / 面试 完整版）
-> 更新时间：2026-10-01 | 素材来源：真实 Git 提交记录 + 本地版本比对，无虚构、可核验
+> 更新时间：2026-10-02 | 素材来源：真实 Git 提交记录 + 本地版本比对，无虚构、可核验
 
 ### 项目一：`tool_agent.py` | 无框架手写 ReAct Agent
 1. **实现内容**
@@ -203,15 +203,15 @@ python tool_agent_langgraph.py
 
 ### 项目三：`tool_agent_langgraph.py` | LangGraph 版 ReAct Agent
 1. **实现内容**
-在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：两个节点（`agent_node` 推理、`tool_node` 执行工具）+ 一条条件边（`route_agent`），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。
+在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：四个节点（`agent_node` 推理、`tool_node` 执行工具、`finish_done` 正常结束、`finish_over_limit` 超限结束）+ 一条条件边（`route_agent`），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。
 
 2. **核心问题与解决思路**
    - **问题1：消息历史手动拼容易出错**
      项目一里每轮手动 `messages.append(...)` 维护完整历史；LangGraph 版声明 `Annotated[list, add_messages]`，节点只返回本轮增量消息，框架自动追加进历史，不用再手动拼列表。
    - **问题2：循环终止条件要显式落地成边**
-     手写版靠 `while...else` 区分「模型主动结束 / 步数超限」；LangGraph 版把这两个终止条件收进 `route_agent` 条件边——无工具调用或达到 `DEFAULT_MAX_STEPS` 时返回 `"end"`，否则返回 `"tools"` 进入工具节点、再回到推理节点，形成「推理-行动-观察」闭环。
+     手写版靠 `while...else` 区分「模型主动结束 / 步数超限」；LangGraph 版把这两个终止条件收进 `route_agent` 条件边——无工具调用返回 `"done"`、达到 `DEFAULT_MAX_STEPS` 返回 `"over_limit"`、否则返回 `"tools"` 进入工具节点再回到推理节点，形成「推理-行动-观察」闭环。为让结束原因可追溯，两条终止路径分别接到专用结束节点 `finish_done` / `finish_over_limit`，各自写入 `finish_reason` 字段并在运行末尾打印，正常完成与超限结束一目了然。
    - **问题3：初始状态缺字段会抛 KeyError**
-     `agent_node` 会读 `state["step"]`，所以 `__main__` 里初始状态必须显式给 `step=0`，否则取值时报 KeyError。
+     `agent_node` 会读 `state["step"]`，运行末尾也会读 `state["finish_reason"]`，所以 `__main__` 里初始状态必须显式给 `step=0` 和 `finish_reason=""`，否则取值时报 KeyError。
 
 3. **项目总结**
 工具层零改动，只替换「调度循环」这一层：手写 `while` 循环 → 框架状态图。两者对照能讲清 ReAct 的核心是「推理-行动-观察」闭环，具体用循环还是状态图实现是次要的。
