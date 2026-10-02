@@ -12,7 +12,7 @@
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
-- `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环
+- `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环，并挂 `InMemorySaver` checkpointer 支持跨轮对话记忆
 - `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）
 
 ### 📦 项目依赖
@@ -118,7 +118,7 @@ python simple_agent_demo.py
 python tool_agent_langgraph.py
 ```
 
-复用 `tool_agent.py` 的全部工具定义、工具映射、重试装饰器与最大步数配置，改用 LangGraph `StateGraph` 搭建推理循环：`messages` 用 `Annotated[list, add_messages]` 让框架自动追加、`route_agent` 条件边判断「继续调工具 / 终止」。需额外安装 `langchain-openai`、`langgraph`。
+复用 `tool_agent.py` 的全部工具定义、工具映射、重试装饰器与最大步数配置，改用 LangGraph `StateGraph` 搭建推理循环：`messages` 用 `Annotated[list, add_messages]` 让框架自动追加、`route_agent` 条件边判断「继续调工具 / 终止」，再挂 `InMemorySaver` checkpointer、靠同一个 `thread_id` 让多次 `invoke` 共享记忆。需额外安装 `langchain-openai`、`langgraph`。
 
 ### 5. 常见问题
 | 现象 | 原因与处理 |
@@ -203,7 +203,7 @@ python tool_agent_langgraph.py
 
 ### 项目三：`tool_agent_langgraph.py` | LangGraph 版 ReAct Agent
 1. **实现内容**
-在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：四个节点（`agent_node` 推理、`tool_node` 执行工具、`finish_done` 正常结束、`finish_over_limit` 超限结束）+ 一条条件边（`route_agent`），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。
+在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：四个节点（`agent_node` 推理、`tool_node` 执行工具、`finish_done` 正常结束、`finish_over_limit` 超限结束）+ 一条条件边（`route_agent`），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。另挂 `InMemorySaver` checkpointer 支持跨轮对话记忆。
 
 2. **核心问题与解决思路**
    - **问题1：消息历史手动拼容易出错**
@@ -212,6 +212,8 @@ python tool_agent_langgraph.py
      手写版靠 `while...else` 区分「模型主动结束 / 步数超限」；LangGraph 版把这两个终止条件收进 `route_agent` 条件边——无工具调用返回 `"done"`、达到 `DEFAULT_MAX_STEPS` 返回 `"over_limit"`、否则返回 `"tools"` 进入工具节点再回到推理节点，形成「推理-行动-观察」闭环。为让结束原因可追溯，两条终止路径分别接到专用结束节点 `finish_done` / `finish_over_limit`，各自写入 `finish_reason` 字段并在运行末尾打印，正常完成与超限结束一目了然。
    - **问题3：初始状态缺字段会抛 KeyError**
      `agent_node` 会读 `state["step"]`，运行末尾也会读 `state["finish_reason"]`，所以 `__main__` 里初始状态必须显式给 `step=0` 和 `finish_reason=""`，否则取值时报 KeyError。
+   - **问题4：跨轮对话记忆需要持久化状态**
+     没有 checkpointer 时，每次 `invoke` 都是独立会话，第二次调用不知道上一轮说过什么。挂上 `InMemorySaver` checkpointer 后，用同一个 `thread_id`（`config={"configurable":{"thread_id":"demo-1"}}`）即可让多次 `invoke` 共享状态，`messages` 经 `add_messages` 自动续上历史。`__main__` 里用第二次 invoke 问「我上一条问了你什么」，再断言 `len(state2["messages"]) > len(final_state["messages"])` 验证记忆确实生效（消息数增长，否则说明 checkpointer 没起效）。
 
 3. **项目总结**
-工具层零改动，只替换「调度循环」这一层：手写 `while` 循环 → 框架状态图。两者对照能讲清 ReAct 的核心是「推理-行动-观察」闭环，具体用循环还是状态图实现是次要的。
+工具层零改动，只替换「调度循环」这一层：手写 `while` 循环 → 框架状态图；跨轮记忆等能力再交给框架自带的 checkpointer 白拿。两者对照能讲清 ReAct 的核心是「推理-行动-观察」闭环，具体用循环还是状态图实现是次要的。
