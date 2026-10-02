@@ -14,7 +14,7 @@ from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
-
+from langgraph.checkpoint.memory import InMemorySaver
 from tool_agent import tools, tool_map, DEFAULT_MAX_STEPS
 
 class AgentState(TypedDict):
@@ -125,7 +125,8 @@ graph.add_edge("tools", "agent")
 graph.add_edge("finish_done", END)
 graph.add_edge("finish_over_limit", END)
 
-app = graph.compile()
+checkpointer=InMemorySaver()
+app = graph.compile(checkpointer=checkpointer)
 
 
 if __name__ == "__main__":
@@ -137,7 +138,8 @@ if __name__ == "__main__":
     }
 
     # 一键 invoke 执行完整循环，替代原来的手动逐节点调用
-    final_state = app.invoke(initial_state)
+    config={"configurable":{"thread_id":"demo-1"}}
+    final_state = app.invoke(initial_state, config)
 
     print("=== 最终状态统计 ===")
     print(f"总消息条数: {len(final_state['messages'])}")
@@ -145,3 +147,15 @@ if __name__ == "__main__":
     print(f"结束原因: {final_state['finish_reason']}")
     print("\n=== 模型最终回答 ===")
     print(final_state["messages"][-1].content)
+
+    print("\n=== 第二次 invoke：同一个 thread_id ===")
+    state2 = app.invoke(
+        {"messages": [{"role": "user", "content": "我上一条问了你什么？"}],
+         "step": 0,
+         "finish_reason": ""},
+        config
+    )
+    print("第 1 次总消息条数:", len(final_state["messages"]))
+    print("第 2 次总消息条数:", len(state2["messages"]))
+    print(state2["messages"][-1].content)
+    assert len(state2["messages"]) > len(final_state["messages"]), "记忆没生效：两次消息数一样"
