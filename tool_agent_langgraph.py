@@ -3,6 +3,7 @@ tool_agent_langgraph.py
 基于LangGraph StateGraph实现的完整ReAct工具调用Agent
 复用 tool_agent.py 中全部工具定义、工具映射、重试装饰器与最大步数配置
 使用 LangChain ChatOpenAI 客户端对接 DeepSeek 大模型，通过状态图实现自动推理循环
+状态用 SqliteSaver 持久化，thread_id 为会话标识
 支持能力：时间查询、数学计算、本地文件读取、城市天气查询
 """
 
@@ -10,12 +11,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import sqlite3
 from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from tool_agent import tools, tool_map, DEFAULT_MAX_STEPS
+
+# 存档库路径：锚定到本文件所在目录，避免"相对路径跟着运行时的工作目录跑"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints.sqlite")
+# 会话标识：以后上服务时改成从认证态派生（用户ID + 会话ID），不要接受前端随便传
+THREAD_ID = "demo-2"
+
 
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
@@ -125,7 +133,8 @@ graph.add_edge("tools", "agent")
 graph.add_edge("finish_done", END)
 graph.add_edge("finish_over_limit", END)
 
-checkpointer=InMemorySaver()
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+checkpointer = SqliteSaver(conn)
 app = graph.compile(checkpointer=checkpointer)
 
 
@@ -137,25 +146,25 @@ if __name__ == "__main__":
         "finish_reason":""
     }
 
-    # 一键 invoke 执行完整循环，替代原来的手动逐节点调用
-    config={"configurable":{"thread_id":"demo-1"}}
+    # 一键 invoke 跑完整循环
+    config = {"configurable": {"thread_id": THREAD_ID}}
     final_state = app.invoke(initial_state, config)
 
-    print("=== 最终状态统计 ===")
-    print(f"总消息条数: {len(final_state['messages'])}")
+    print("=== 第 1 次 invoke 结束后的状态 ===")
     print(f"总推理步数: {final_state['step']}")
     print(f"结束原因: {final_state['finish_reason']}")
-    print("\n=== 模型最终回答 ===")
+    print("\n=== 第 1 次 invoke 的模型回答 ===")
     print(final_state["messages"][-1].content)
 
-    print("\n=== 第二次 invoke：同一个 thread_id ===")
+    print("\n=== 第 2 次 invoke：同一个 thread_id ===")
     state2 = app.invoke(
         {"messages": [{"role": "user", "content": "我上一条问了你什么？"}],
          "step": 0,
          "finish_reason": ""},
         config
     )
-    print("第 1 次总消息条数:", len(final_state["messages"]))
-    print("第 2 次总消息条数:", len(state2["messages"]))
+    print("第 1 次消息条数:", len(final_state["messages"]))
+    print("第 2 次消息条数:", len(state2["messages"]))
+    print("\n=== 第 2 次 invoke 的模型回答 ===")
     print(state2["messages"][-1].content)
     assert len(state2["messages"]) > len(final_state["messages"]), "记忆没生效：两次消息数一样"
