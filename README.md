@@ -12,7 +12,7 @@
       - ✅ 只在最外层做一次 overlap 拼接 + 参数校验
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
-- `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环，并挂 `SqliteSaver` checkpointer 把状态落盘，支持跨轮对话记忆
+- `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环；挂 `SqliteSaver` checkpointer 把状态落盘、支持跨轮对话记忆；并对「同一工具连续重复调用」做熔断（`repeat_count`）
 - `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）
 
 ### 📦 项目依赖
@@ -118,7 +118,7 @@ python simple_agent_demo.py
 python tool_agent_langgraph.py
 ```
 
-复用 `tool_agent.py` 的全部工具定义、工具映射、重试装饰器与最大步数配置，改用 LangGraph `StateGraph` 搭建推理循环：`messages` 用 `Annotated[list, add_messages]` 让框架自动追加、`route_agent` 条件边判断「继续调工具 / 终止」，再挂 `SqliteSaver` checkpointer（状态落在脚本同目录的 `checkpoints.sqlite`，路径用 `os.path.dirname(os.path.abspath(__file__))` 锚定、不受启动目录影响）、靠同一个 `thread_id` 让多次 `invoke` 共享记忆。需额外安装 `langchain-openai`、`langgraph`。
+复用 `tool_agent.py` 的全部工具定义、工具映射、重试装饰器与最大步数配置，改用 LangGraph `StateGraph` 搭建推理循环：`messages` 用 `Annotated[list, add_messages]` 让框架自动追加、`route_agent` 条件边判断「继续调工具 / 终止」，再挂 `SqliteSaver` checkpointer（状态落在脚本同目录的 `checkpoints.sqlite`，路径用 `os.path.dirname(os.path.abspath(__file__))` 锚定、不受启动目录影响）、靠同一个 `thread_id` 让多次 `invoke` 共享记忆。另对「同一工具连续重复调用」做熔断：连续超过 `MAX_REPEAT`（默认 3）次即走 `finish_repeat_limit` 收尾，第 4 次请求不再执行。需额外安装 `langchain-openai`、`langgraph`。
 
 ### 5. 常见问题
 | 现象 | 原因与处理 |
@@ -132,7 +132,7 @@ python tool_agent_langgraph.py
 ---
 
 ## ✨ 项目深度复盘（简历 / 面试 完整版）
-> 更新时间：2026-10-02 | 素材来源：真实 Git 提交记录 + 本地版本比对，无虚构、可核验
+> 更新时间：2026-10-04 | 素材来源：真实 Git 提交记录 + 本地版本比对，无虚构、可核验（2026-10-04 补：重复调用熔断与问题6）
 
 ### 项目一：`tool_agent.py` | 无框架手写 ReAct Agent
 1. **实现内容**
@@ -203,7 +203,7 @@ python tool_agent_langgraph.py
 
 ### 项目三：`tool_agent_langgraph.py` | LangGraph 版 ReAct Agent
 1. **实现内容**
-在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：四个节点（`agent_node` 推理、`tool_node` 执行工具、`finish_done` 正常结束、`finish_over_limit` 超限结束）+ 一条条件边（`route_agent`），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。另挂 `SqliteSaver` checkpointer 把状态落盘到脚本同目录的 `checkpoints.sqlite`，支持跨轮对话记忆。
+在「项目一」手写 ReAct 的基础上，用 LangGraph `StateGraph` 重构调度循环：五个节点（`agent_node` 推理、`tool_node` 执行工具、`finish_done` 正常结束、`finish_over_limit` 步数超限结束、`finish_repeat_limit` 重复调用熔断结束）+ 两条条件边（`route_agent` 决定继续调工具 / 终止，`route_after_tools` 决定回推理 / 熔断收尾），复用 `tool_agent.py` 中全部工具定义、工具映射、重试装饰器与最大步数配置，工具层零改动。另挂 `SqliteSaver` checkpointer 把状态落盘到脚本同目录的 `checkpoints.sqlite`，支持跨轮对话记忆。
 
 2. **核心问题与解决思路**
    - **问题1：消息历史手动拼容易出错**
@@ -216,6 +216,8 @@ python tool_agent_langgraph.py
      没有 checkpointer 时，每次 `invoke` 都是独立会话，第二次调用不知道上一轮说过什么。挂上 checkpointer 后，用同一个 `thread_id` 即可让多次 `invoke` 共享状态，`messages` 经 `add_messages` 自动续上历史。`__main__` 里用第二次 invoke 问「我上一条问了你什么」，再断言 `len(state2["messages"]) > len(final_state["messages"])` 验证记忆确实生效（消息数增长，否则说明 checkpointer 没起效）。最初挂的是 `InMemorySaver`，但它的存档只活在进程内存里、脚本一结束记忆就没了，只适合调试；现改为 `SqliteSaver`，状态写进 SQLite 的 `checkpoints` / `writes` 两张表，同一个 `thread_id` 换个进程也能续上。
    - **问题5：存档路径用相对路径会「记忆凭空消失」**
      `sqlite3.connect("checkpoints.sqlite")` 是相对路径，而相对路径的基准是**运行时的工作目录（CWD）**、不是脚本所在目录：从 PyCharm 里运行、在终端 `cd` 到别处运行，会分别解析成不同的文件（`sqlite3.connect` 还会顺手新建一个空库），表现为「换了个地方启动，记忆就没了」。解决：`DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints.sqlite")`，用脚本自身位置锚定，从任何目录启动都读写同一份存档；会话标识也从硬编码提为顶部常量 `THREAD_ID`，为上服务时「从认证态派生」留出改造点。
+   - **问题6：模型可能在同一工具上死磕 → 加第二道闸门（重复调用熔断）**
+     只有 `DEFAULT_MAX_STEPS` 一道闸门时，模型换着工具调一样能烧完额度；于是针对「连续同一个调用」再加一道：`state` 增 `last_tool` / `repeat_count` / `repeat_breach` 三个**覆盖型**字段（语义是「当前」连续到第几次、不是历史累计，所以不能用 reducer），`tool_node` 里按「工具名 + 参数」签名逐个推计数、**执行前**判限，超过 `MAX_REPEAT`（默认 3）的第 4 次请求不执行，并把本轮剩余调用各补一条「未执行」的 tool 消息 —— 否则 `assistant.tool_calls` 与 tool 回复数量不匹配，下次调模型会直接 400。熔断后由 `route_after_tools` 条件边导向 `finish_repeat_limit` 收尾（而不是抛异常中断：抛异常会让图停在中间、`finish_reason` 写不进、存档留半截状态）。重置四时机：换工具、本轮推理结束（收尾节点归零）、新一次 `invoke`（入参归零）、参数不同即算新调用。验证方式是 6 个边界用例（同工具×4 / 换工具 / 不同参数 / 同参数×4 / 路由函数 / 带脏计数进入），不依赖真机调模型。
 
 3. **项目总结**
-工具层零改动，只替换「调度循环」这一层：手写 `while` 循环 → 框架状态图；跨轮记忆等能力再交给框架自带的 checkpointer 白拿。两者对照能讲清 ReAct 的核心是「推理-行动-观察」闭环，具体用循环还是状态图实现是次要的。
+工具层零改动，只替换「调度循环」这一层：手写 `while` 循环 → 框架状态图；跨轮记忆交给框架自带的 checkpointer 白拿，而「重复调用熔断」这类护栏（guardrail）要自己在状态里建模、再落到条件边上。两者对照能讲清 ReAct 的核心是「推理-行动-观察」闭环，具体用循环还是状态图实现是次要的。
