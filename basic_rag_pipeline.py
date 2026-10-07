@@ -3,6 +3,8 @@
 将知识文档分块 -> 用 bge-small-zh 向量化 -> 按余弦相似度检索 TopK 片段 ->
 按 token 预算裁剪上下文后组装 prompt，调用 DeepSeek Chat API 生成回答。
 
+语料库来源：自学的知识整理的obsidian仓库
+
 依赖安装：
     pip install sentence-transformers tiktoken requests numpy python-dotenv
 
@@ -10,11 +12,16 @@
     1. 在 .env 中填入 OPENAI_API_KEY（DeepSeek 开放平台申请的 API Key）
     2. python basic_rag_pipeline.py
     3. 首次运行会自动下载向量模型 BAAI/bge-small-zh-v1.5
+
+返回值：list[ChunkPosition]（每块文本 + 在原文中的区间）
+        注意：_raw=True 时（供内部递归使用）返回 list[str]（无重叠的原始块）
 """
 import os
+import re
 from dotenv import load_dotenv
 load_dotenv()
 from sentence_transformers import SentenceTransformer
+from notes_loader import load_docs
 from dataclasses import dataclass
 import numpy as np
 import tiktoken
@@ -28,16 +35,26 @@ BASE_URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-chat"
 
 # 全局统一分隔符：分块逻辑、边界校验共用，避免两处定义不一致
-SEPARATORS = ["\n\n", "。", "\n"]
+SEPARATORS = ["\n\n", "。", "\n", "|", "，", "、", "；", "：", " "]
 
+
+@dataclass(frozen=True)
+class ChunkPosition:
+    text: str
+    start:int
+    end:int
+    actual_overlap:int
+    truncated:bool
+    source:str=""  # 哪份文件 —— 分块函数不知道，由上层填
+    index:int=-1   # 同一文档内的块序号 —— 同上
 
 @dataclass
 class ChunkItem:
-    text: str
+    pos:ChunkPosition
     vector: list[float]
 
 
-def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = False) -> list[str]:
+def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = False) -> list[ChunkPosition]:
     # 参数校验只在最外层跑，递归进去跳过
     if not _raw:
         if max_chunk_size <= 0:
@@ -98,19 +115,60 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
     if _raw:
         return merged_chunks
 
-    result = []
-    # 一体化处理，根治重叠无限膨胀
+    positions =[]   # ← 装每块的位置，循环里往里放
+    cursor = 0  # ← 游标：读头当前在原文的哪个位置
+
     for idx, chunk in enumerate(merged_chunks):
+        truncated = False  # ← 先假定"没被截断"
+
         if idx == 0:
-            result.append(chunk)
+            actual_overlap = 0
+            new_chunk = chunk
         else:
             prev = merged_chunks[idx - 1]
             new_chunk = prev[-overlap:] + chunk
+            actual_overlap = len(prev[-overlap:])  # ← 本块开头【实际】被前置了几字
             if len(new_chunk) > max_chunk_size:
-                # 超上限从前向后截断，保留前置重叠上下文
                 new_chunk = new_chunk[:max_chunk_size]
-            result.append(new_chunk)
-    return result
+                truncated = True  # ← 进了这条分支，说明我们的文本被截断
+
+
+        # —— 记录位置（今天只收集，不改返回值）——
+        end_of_new = cursor+len(chunk)   # ← 本块【新增正文】的终点
+        start = cursor-actual_overlap  # ← 整块区间的起点
+        positions.append(ChunkPosition(
+            text=new_chunk,
+            start=start,
+            end=end_of_new,
+            actual_overlap=actual_overlap,
+            truncated=truncated,
+            source="",  # 哪份文件由上层填
+            index=idx,  # 本块在本文档里的第几块
+        ))
+        cursor = end_of_new  #  推进读头
+
+    assert positions[0].start == 0, f"第 0 块起点应为 0，实际 {positions[0].start}"
+    assert len(positions) == len(merged_chunks), "有块没被记录"
+
+    # 只打印：前 3 块 + 第 39 块 + 最后 1 块
+    for p in positions[:3] + positions[39:40] + positions[-1:]:
+        print(f"块{p.index} 原文[{p.start},{p.end}) 实际重叠{p.actual_overlap} "
+            f"截断{p.truncated} 尾20字={p.text[-20:]!r}")
+    return positions  #只回位置对象
+
+
+def row_num(text:str,offset:int)->int:
+    return text[:offset].count("\n")+1
+
+
+def subsection_location(text:str,offset:int)->str:
+    section="(无标题区)"
+    for m in re.finditer(r"^#{1,6} .*$", text,re.M):
+        if m.start() <= offset:
+            section = m.group().strip()
+        else:
+            break
+    return section
 
 def check_max_chunk(chunks: list[str], max_chunk_size: int,) -> tuple[bool, int, str]:
     """
@@ -174,12 +232,12 @@ def format_first_diff(restored: str, original: str, diff_index: int) -> str:
         return f"第 {diff_index} 字起：还原已结束，原文尚余「{original[diff_index:diff_index + span]}」"
     return f"第 {diff_index} 字：还原「{restored[start:diff_index + span]}」/ 原文「{original[start:diff_index + span]}」"
 
-def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool, int, int, str]:
+def check_no_loss(chunks: list[str], original: str, overlaps: int) -> tuple[bool, int, int, str]:
     """
     去掉每个块的前缀重叠后拼接还原，与原文比对验证无信息丢失
     :param chunks: 带重叠的分块结果
     :param original: 原始完整文本
-    :param overlap: 分块重叠长度
+    :param overlaps: 每一块【实际】的前置重叠字数（第 i 块用 overlaps[i]）
     :return: (是否完全一致, 还原后文本长度, 原文长度, 首个差异说明，一致时为「无差异」)
     """
     # 【已知问题·overlap=0】prev[-0:] == prev[0:] 会取到整个前一块 → 块1 开头多塞块0 全文
@@ -190,8 +248,8 @@ def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool,
         restored = ""
     else:
         restored_parts = [chunks[0]]
-        for chunk in chunks[1:]:
-            restored_parts.append(chunk[overlap:])
+        for i in range(1,len(chunks)):
+            restored_parts.append(chunks[i][overlaps[i]:])
         restored = "".join(restored_parts)
 
     is_equal = (restored == original)
@@ -199,21 +257,22 @@ def check_no_loss(chunks: list[str], original: str, overlap: int) -> tuple[bool,
     diff_desc = format_first_diff(restored, original, first_diff_index(restored, original))
     return is_equal, len(restored), len(original), diff_desc
 
-def check_overlap_consistency(chunks: list[str], overlap: int) -> tuple[bool, int, list[int]]:
+def check_overlap_consistency(chunks: list[str], overlaps: int) -> tuple[bool, int, list[int]]:
     """
     校验相邻块之间重叠区域一致性
     规则：第i块(A)末尾overlap个字符，必须等于第i+1块(B)开头overlap个字符
     :param chunks: 带重叠的文本分块列表
-    :param overlap: 设定的重叠字符长度
+    :param overlaps: 每一块【实际】的前置重叠字数（第 i+1 块前置的是 overlaps[i+1] 个字）
     :return: (是否全部重叠合法, 错误的相邻块对总数, 出错块对下标列表)
         注意：返回的下标i代表 chunks[i] 和 chunks[i+1] 这一对校验失败
     """
     bad_pair_idx = []
     for i, chunk_a in enumerate(chunks[:-1]):
         chunk_b = chunks[i+1]
-        tail_a = chunk_a[-overlap:]
-        head_b = chunk_b[:overlap]
-        if tail_a != head_b:
+        n = overlaps[i+1]
+        if n == 0:
+            continue
+        if chunk_a[-n:] != chunk_b[:n]:
             bad_pair_idx.append(i)
     bad_count = len(bad_pair_idx)
     all_ok = (bad_count == 0)
@@ -230,13 +289,13 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return float(dot / (norm_a * norm_b))
 
 
-def retrieve(query: str, model, vector_store: list[ChunkItem], top_k: int = 2) -> list[str]:
+def retrieve(query: str, model, vector_store: list[ChunkItem], top_k: int = 2) -> list[ChunkItem]:
     top_k = min(top_k, len(vector_store))
     q_emb = model.encode(query)
     score_list = []
     for item in vector_store:
         score = cosine_similarity(q_emb, item.vector)
-        score_list.append((score, item.text))
+        score_list.append((score, item))
     score_list.sort(key=lambda x: x[0], reverse=True)
     recall_result = score_list[:top_k]
     top_chunks = [text for score, text in recall_result]
@@ -316,14 +375,32 @@ def llm_chat(
         raise RuntimeError(f"网络请求异常：{str(e)}")
 
 
-demo_doc = """Agent（智能体）可以自主规划任务，调用工具，读取记忆。RAG检索增强生成，通过知识库检索，给大模型补充外部资料，减少幻觉。文本分块是RAG第一步，合理的分块大小直接影响检索效果。分块过大混入无关信息，分块过小丢失完整语义。递归切分是常见的语义分块方案，它会优先按照标点、段落等语义边界逐级拆分文本，在保证单块长度不超限的前提下尽可能保留语义完整性。重叠机制则用于缓解分块处的上下文断裂问题，让相邻块之间保留一段公共内容，避免关键信息刚好落在切分线上被截断。"""
+# ── 语料来源：改成"真从笔记里读出来的正文" ──
+# 今天只取 1 篇（最长的那篇），目的是验证「加载 → 分块」这条接口通不通；
+# 多文档是下一环的事，不在这里混着做。
+def load_demo_doc() -> str:
+    docs, errors, bom_files = load_docs()
+    assert docs, "语料库一篇都没读进来，先单独跑 python notes_loader.py 排查"
+    longest = max(docs, key=lambda d: len(d["text"]))     # ← 业务选择放在这里，不放进 loader
+    print(f"【语料载入】共 {len(docs)} 篇 | 带 BOM {bom_files} 篇")
+    print(f"【语料载入】今天用最长的一篇：{longest['path']}（{len(longest['text'])} 字）")
+    if errors:
+        print(f"【语料载入】⚠️ 有 {len(errors)} 篇被跳过（本次不用）：")
+        for _p, _why in errors:
+            print(f"  - {_p}  →  {_why}")
+    return longest["text"]
 
+
+demo_doc = load_demo_doc()
 if __name__ == "__main__":
     model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     tokenizer = tiktoken.get_encoding("cl100k_base")
     max_chunk_size = 150
     overlap = 30
-    chunks = recursive_split(demo_doc, max_chunk_size=max_chunk_size, overlap=overlap)
+
+    positions = recursive_split(demo_doc, max_chunk_size=max_chunk_size, overlap=overlap)
+    chunks = [p.text for p in positions]  # ← 一行还原：给下面 4 道校验用
+    overlaps = [p.actual_overlap for p in positions]
 
     is_ok, max_chunk_num, max_chunk_text = check_max_chunk(chunks, max_chunk_size=max_chunk_size)
     assert is_ok, f"【最大分块字数校验失败】最长块长度:{max_chunk_num}, 超过上限{max_chunk_size}"
@@ -336,15 +413,23 @@ if __name__ == "__main__":
     assert checked_num > 0, "测试无效：分块后仅1块，未触发任何边界检查，请调小max_chunk_size或加长测试文本"
 
     print(f"【分块边界校验】不合格数: {bad_cnt} | 检查块数: {checked_num} | 坏块下标: {bad_idx_list}")
+    for i in bad_idx_list[:3]:                 # 只打前 3 个
+        p = positions[i]                       # ★ 这就是"把 positions 送出来"的意义
+        print(f"坏块 {p.index} → 原文[{p.start},{p.end}) "
+              f"· 第 {row_num(demo_doc, p.start)}–{row_num(demo_doc, p.end)} 行 "
+              f"· {subsection_location(demo_doc, p.start)}")
+        print(f"    块尾 20 字：{p.text[-20:]!r}")
+    if len(bad_idx_list) > 3:
+        print(f"（其余 {len(bad_idx_list) - 3} 个见下标列表）")
     assert boundary_result == (0, checked_num, []), f"分块边界校验不通过，实际结果：{boundary_result},本次分隔符为{SEPARATORS}"
 
     # 哨兵断言：少于2块不存在相邻对，本项校验无意义，禁止空跑
     assert len(chunks) > 1, "重叠一致性校验空跑：分块后仅1块，无相邻块对可校验"
-    overlap_ok, overlap_bad_cnt, overlap_bad_idx = check_overlap_consistency(chunks, overlap)
+    overlap_ok, overlap_bad_cnt, overlap_bad_idx = check_overlap_consistency(chunks, overlaps)
     print(f"【重叠一致性校验】不匹配对数: {overlap_bad_cnt} | 坏块对下标: {overlap_bad_idx} | 本次的overlap参数:{overlap}")
     assert overlap_ok, f"重叠一致性校验失败，不匹配块对下标：{overlap_bad_idx} | 本次的overlap参数:{overlap}"
 
-    no_loss_result = check_no_loss(chunks, demo_doc, overlap=overlap)
+    no_loss_result = check_no_loss(chunks, demo_doc, overlaps)
     no_loss_ok, restored_len, origin_len, diff_desc = no_loss_result
     # ① 哨兵断言：块数必须 > 1，否则这个检查也是空跑
     assert len(chunks) > 1, "无损校验空跑：分块后仅1块，无法验证重叠还原逻辑"
@@ -356,10 +441,19 @@ if __name__ == "__main__":
     vector_store: list[ChunkItem] = []
     for c in chunks:
         emb = model.encode(c).tolist()
-        vector_store.append(ChunkItem(text=c, vector=emb))
+        vector_store:list[ChunkItem] = []
+        for i ,c in enumerate(chunks):
+            emb = model.encode(c).tolist()
+            vector_store.append(ChunkItem(pos=positions[i],vector=emb))
 
     query = "什么是RAG？"
-    retrieved_chunks = retrieve(query, model, vector_store, top_k=2)
+    retrieved = retrieve(query, model, vector_store, top_k=2)
+
+    print(f"【检索命中】query = {query!r}")
+    for it in retrieved:
+        p = it.pos
+        print(f"  · 第 {row_num(demo_doc, p.start)}–{row_num(demo_doc, p.end - 1)} 行 "
+              f"· {subsection_location(demo_doc, p.start)} · 片段: {p.text[:28]!r}…")
 
     system_prompt = "你是知识库问答助手，请依据下面参考文档回答用户问题，如果文档没有答案就如实说明，禁止编造幻觉内容。"
     MODEL_MAX_WINDOW = 4096
@@ -376,7 +470,7 @@ if __name__ == "__main__":
         print("【警告】可用知识库token配额为0，不会加载任何参考文档片段")
 
     safe_context = clip_context_by_max_token(
-        chunk_list=retrieved_chunks,
+        chunk_list=[it.pos.text for it in retrieved],
         token_limit=available_chunk_token,
         tokenizer=tokenizer
     )

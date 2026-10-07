@@ -222,7 +222,7 @@ app = graph.compile(checkpointer=checkpointer)
 if __name__ == "__main__":
     # 初始状态必须显式给 step=0，否则 agent_node 取值会报 KeyError
     initial_state = {
-        "messages": [{"role": "user", "content": "现在几点？"}],
+        "messages": [{"role": "user", "content": "现在郑州天气？"}],
         "step": 0,
         "finish_reason": "",
         "last_tool": "",
