@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from sentence_transformers import SentenceTransformer
 from notes_loader import load_docs
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
 import numpy as np
 import tiktoken
 import requests
@@ -35,7 +35,7 @@ BASE_URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-chat"
 
 # 全局统一分隔符：分块逻辑、边界校验共用，避免两处定义不一致
-SEPARATORS = ["\n\n", "。", "\n", "|", "，", "、", "；", "：", " "]
+SEPARATORS = ["\n\n", "。", "\n", "|",  "；", "：", " "]
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class ChunkPosition:
     end:int
     actual_overlap:int
     truncated:bool
+    header:str=""  # 这块属于哪一节—— 递归里只有片段、算不出来
     source:str=""  # 哪份文件 —— 分块函数不知道，由上层填
     index:int=-1   # 同一文档内的块序号 —— 同上
 
@@ -399,7 +400,11 @@ if __name__ == "__main__":
     overlap = 30
 
     positions = recursive_split(demo_doc, max_chunk_size=max_chunk_size, overlap=overlap)
-    chunks = [p.text for p in positions]  # ← 一行还原：给下面 4 道校验用
+
+    positions=[replace(p,header=subsection_location(demo_doc,p.start)) for p in positions]
+    assert all(p.header for p in positions),"有块的 header 是空的 —— 说明没补上"
+
+    chunks = [p.text for p in positions]  #  这一行还原：给下面 4 道校验用
     overlaps = [p.actual_overlap for p in positions]
 
     is_ok, max_chunk_num, max_chunk_text = check_max_chunk(chunks, max_chunk_size=max_chunk_size)
@@ -417,7 +422,7 @@ if __name__ == "__main__":
         p = positions[i]                       # ★ 这就是"把 positions 送出来"的意义
         print(f"坏块 {p.index} → 原文[{p.start},{p.end}) "
               f"· 第 {row_num(demo_doc, p.start)}–{row_num(demo_doc, p.end)} 行 "
-              f"· {subsection_location(demo_doc, p.start)}")
+               f"· {p.header}")
         print(f"    块尾 20 字：{p.text[-20:]!r}")
     if len(bad_idx_list) > 3:
         print(f"（其余 {len(bad_idx_list) - 3} 个见下标列表）")
@@ -453,7 +458,7 @@ if __name__ == "__main__":
     for it in retrieved:
         p = it.pos
         print(f"  · 第 {row_num(demo_doc, p.start)}–{row_num(demo_doc, p.end - 1)} 行 "
-              f"· {subsection_location(demo_doc, p.start)} · 片段: {p.text[:28]!r}…")
+               f"· {p.header} · 片段: {p.text[:28]!r}…")
 
     system_prompt = "你是知识库问答助手，请依据下面参考文档回答用户问题，如果文档没有答案就如实说明，禁止编造幻觉内容。"
     MODEL_MAX_WINDOW = 4096
