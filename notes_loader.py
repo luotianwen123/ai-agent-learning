@@ -14,7 +14,7 @@ from pathlib import Path
 
 # 语料根目录：写【绝对路径】—— 相对路径的基准是"运行时的工作目录"，换个目录启动就会指向别处
 ROOT = Path(r"C:\Users\luotianwen\ai-agent-notes")
-EXCLUDE_DIRS = {".obsidian", "_附件", "99-原始存档","07-求职复习"}
+EXCLUDE_DIRS = {".obsidian", "_附件", "99-原始存档", "07-求职复习", "98-代码变更卡"}
 
 
 
@@ -63,10 +63,10 @@ def load_docs(root: Path = ROOT) -> tuple[list[dict], list[tuple[str, str]], int
 
     unknown = EXCLUDE_DIRS - {p.name for p in root.iterdir() if p.is_dir()}
     if unknown:
-        print(f"   ⚠️ 排除名单里的 {sorted(unknown)} 在语料根目录下不存在 —— 名字可能写歪了")
+        print(f"   ⚠️ 排除名单里的 {sorted(unknown)} 在语料根目录下不存在 —— 名字可能写错了")
 
     if EXCLUDE_DIRS and not dropped:
-        print("   ⚠️ 排除名单非空、却一篇都没排掉 —— 过滤没生效，别信这篇数")
+        print("   ⚠️ 排除名单非空、却一篇都没排掉 —— 过滤失效")
 
     docs, errors = [], []
     bom_files = 0

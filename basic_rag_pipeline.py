@@ -18,8 +18,10 @@
 """
 import os
 import re
+
 from dotenv import load_dotenv
 load_dotenv()
+from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from notes_loader import load_docs
 from dataclasses import dataclass,replace
@@ -38,13 +40,13 @@ MODEL = "deepseek-chat"
 SEPARATORS = ["\n\n", "。", "\n", "|",  "；", "：", " "]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) #frozen=True 的意思是这个对象一旦造出来就不能改
 class ChunkPosition:
-    text: str
-    start:int
-    end:int
-    actual_overlap:int
-    truncated:bool
+    text: str      # 这一块的实际字符串（含重叠前缀）	要拿去编码、拼 prompt
+    start:int      #这块在原文中的起点（字符下标）	回溯定位 —— "这段是哪来的"
+    end:int        #这块新增正文的终点	配合 start 算出区间 [start, end)
+    actual_overlap:int #实际前置了几个字
+    truncated:bool #是否被 max_chunk_size 截断过	有这个标记才知道"这块不完整"
     header:str=""  # 这块属于哪一节—— 递归里只有片段、算不出来
     source:str=""  # 哪份文件 —— 分块函数不知道，由上层填
     index:int=-1   # 同一文档内的块序号 —— 同上
@@ -127,8 +129,12 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
             new_chunk = chunk
         else:
             prev = merged_chunks[idx - 1]
-            new_chunk = prev[-overlap:] + chunk
-            actual_overlap = len(prev[-overlap:])  # ← 本块开头【实际】被前置了几字
+            if overlap>0:
+                prev_tail = prev[-overlap:]
+            else:
+                prev_tail = ""
+            new_chunk = prev_tail  + chunk
+            actual_overlap =  len(prev_tail)    # ← 本块开头【实际】被前置了几字
             if len(new_chunk) > max_chunk_size:
                 new_chunk = new_chunk[:max_chunk_size]
                 truncated = True  # ← 进了这条分支，说明我们的文本被截断
@@ -233,7 +239,7 @@ def format_first_diff(restored: str, original: str, diff_index: int) -> str:
         return f"第 {diff_index} 字起：还原已结束，原文尚余「{original[diff_index:diff_index + span]}」"
     return f"第 {diff_index} 字：还原「{restored[start:diff_index + span]}」/ 原文「{original[start:diff_index + span]}」"
 
-def check_no_loss(chunks: list[str], original: str, overlaps: int) -> tuple[bool, int, int, str]:
+def check_no_loss(chunks: list[str], original: str, overlaps: list[int]) -> tuple[bool, int, int, str]:
     """
     去掉每个块的前缀重叠后拼接还原，与原文比对验证无信息丢失
     :param chunks: 带重叠的分块结果
@@ -258,7 +264,7 @@ def check_no_loss(chunks: list[str], original: str, overlaps: int) -> tuple[bool
     diff_desc = format_first_diff(restored, original, first_diff_index(restored, original))
     return is_equal, len(restored), len(original), diff_desc
 
-def check_overlap_consistency(chunks: list[str], overlaps: int) -> tuple[bool, int, list[int]]:
+def check_overlap_consistency(chunks: list[str], overlaps: list[int]) -> tuple[bool, int, list[int]]:
     """
     校验相邻块之间重叠区域一致性
     规则：第i块(A)末尾overlap个字符，必须等于第i+1块(B)开头overlap个字符
@@ -377,88 +383,94 @@ def llm_chat(
 
 
 # ── 语料来源：改成"真从笔记里读出来的正文" ──
-# 今天只取 1 篇（最长的那篇），目的是验证「加载 → 分块」这条接口通不通；
-# 多文档是下一环的事，不在这里混着做。
-def load_demo_doc() -> str:
-    docs, errors, bom_files = load_docs()
-    assert docs, "语料库一篇都没读进来，先单独跑 python notes_loader.py 排查"
-    longest = max(docs, key=lambda d: len(d["text"]))     # ← 业务选择放在这里，不放进 loader
-    print(f"【语料载入】共 {len(docs)} 篇 | 带 BOM {bom_files} 篇")
-    print(f"【语料载入】今天用最长的一篇：{longest['path']}（{len(longest['text'])} 字）")
-    if errors:
-        print(f"【语料载入】⚠️ 有 {len(errors)} 篇被跳过（本次不用）：")
-        for _p, _why in errors:
-            print(f"  - {_p}  →  {_why}")
-    return longest["text"]
+def build_corpus(docs: list[dict], max_chunk_size: int, overlap: int):
+    """第一段（文档级）：每篇各自分块 → 补 header/source → 逐篇跑四道校验
+
+    :return: (all_positions, report, failures)
+             all_positions = 全库所有块（含"跳过校验"那篇的块）
+             report        = [(文件名, "通过"/"跳过"/"失败", 细节), ...]
+             failures      = [(文件名, [原因, ...]), ...]  （非空时由调用方决定要不要 raise）
+    """
+    all_positions: list[ChunkPosition] = []
+    report, failures = [], []
+
+    for d in docs:
+        name = Path(d["path"]).name
+        text = d["text"]
+
+        ps = recursive_split(text, max_chunk_size=max_chunk_size, overlap=overlap)
+        # header 用【这一篇的】text 算；source 一起补（否则 50 篇混完就分不清来源）
+        ps = [replace(p, header=subsection_location(text, p.start), source=d["path"]) for p in ps]
+        assert all(p.header for p in ps), f"{name}: 有块的 header 是空的"
+
+        all_positions.extend(ps)          # ★ 先入库 —— 后面走哪个分支都不会漏
+
+        ch = [p.text for p in ps]
+        ov = [p.actual_overlap for p in ps]
+
+        if len(ch) < 2:                   # 单块文档：没有相邻对可校验 → 跳过，但必须上报
+            report.append((name, "跳过", "只分出 1 块，无相邻对可校验"))
+            continue
+
+        ok1, max_num, _ = check_max_chunk(ch, max_chunk_size=max_chunk_size)
+        bad_cnt, checked_num, bad_idx = check_boundary(ch, SEPARATORS)
+        ok2 = (bad_cnt == 0) and (checked_num > 0)
+        ok3, bad_pairs, bad_pair_idx = check_overlap_consistency(ch, ov)
+        ok4, restored_len, origin_len, diff_desc = check_no_loss(ch, text, ov)
+
+        if ok1 and ok2 and ok3 and ok4:
+            report.append((name, "通过", f"{len(ch)} 块 · 最长 {max_num}"))
+            continue
+
+        why = []
+        if not ok1: why.append(f"块超长 {max_num}>{max_chunk_size}")
+        if not ok2: why.append(f"边界不合格 {bad_cnt}/{checked_num} 坏块{bad_idx[:3]}")
+        if not ok3: why.append(f"重叠不匹配 {bad_pairs} 对 {bad_pair_idx[:3]}")
+        if not ok4: why.append(f"还原 {restored_len}/{origin_len} {diff_desc}")
+        report.append((name, "失败", "；".join(why)))
+        failures.append((name, why))
+
+    return all_positions, report, failures
 
 
-demo_doc = load_demo_doc()
 if __name__ == "__main__":
     model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     tokenizer = tiktoken.get_encoding("cl100k_base")
-    max_chunk_size = 150
-    overlap = 30
+    max_chunk_size, overlap = 150, 30
 
-    positions = recursive_split(demo_doc, max_chunk_size=max_chunk_size, overlap=overlap)
+    # ===== 第一段：文档级 =====
+    docs, errors, bom_files = load_docs()
+    assert docs, "语料库一篇都没读进来，先单独跑 python notes_loader.py 排查"
+    path2text = {d["path"]: d["text"] for d in docs}  # 算行号要用（source → 正文）
+    print(f"【语料载入】共 {len(docs)} 篇 | 带 BOM {bom_files} 篇"
+          + (f" | 跳过 {len(errors)} 篇" if errors else ""))
 
-    positions=[replace(p,header=subsection_location(demo_doc,p.start)) for p in positions]
-    assert all(p.header for p in positions),"有块的 header 是空的 —— 说明没补上"
+    all_positions, report, failures = build_corpus(docs, max_chunk_size, overlap)
 
-    chunks = [p.text for p in positions]  #  这一行还原：给下面 4 道校验用
-    overlaps = [p.actual_overlap for p in positions]
+    n_skip = sum(1 for _, v, _ in report if v == "跳过")
+    n_fail = sum(1 for _, v, _ in report if v == "失败")
+    print(f"【逐篇校验】{len(report)} 篇 → 通过 {len(report) - n_skip - n_fail} · 跳过 {n_skip} · 失败 {n_fail}")
+    for name, verdict, detail in report:
+        if verdict != "通过":
+            print(f"  {verdict}  {name}  {detail}")
+    print(f"【数量对账】全库块数 {len(all_positions)}")
+    assert not failures, f"有 {len(failures)} 篇没通过逐篇校验，见上方明细"
 
-    is_ok, max_chunk_num, max_chunk_text = check_max_chunk(chunks, max_chunk_size=max_chunk_size)
-    assert is_ok, f"【最大分块字数校验失败】最长块长度:{max_chunk_num}, 超过上限{max_chunk_size}"
-    print(f"【最大分块字数】最长块字符数: {max_chunk_num}, 未超过上限{max_chunk_size}")
-
-    boundary_result = check_boundary(chunks, SEPARATORS)
-    bad_cnt, checked_num, bad_idx_list = boundary_result
-
-    #【哨兵断言】确保测试有效：必须真的检查到了块，禁止空跑（只分出1块的无效场景）
-    assert checked_num > 0, "测试无效：分块后仅1块，未触发任何边界检查，请调小max_chunk_size或加长测试文本"
-
-    print(f"【分块边界校验】不合格数: {bad_cnt} | 检查块数: {checked_num} | 坏块下标: {bad_idx_list}")
-    for i in bad_idx_list[:3]:                 # 只打前 3 个
-        p = positions[i]                       # ★ 这就是"把 positions 送出来"的意义
-        print(f"坏块 {p.index} → 原文[{p.start},{p.end}) "
-              f"· 第 {row_num(demo_doc, p.start)}–{row_num(demo_doc, p.end)} 行 "
-               f"· {p.header}")
-        print(f"    块尾 20 字：{p.text[-20:]!r}")
-    if len(bad_idx_list) > 3:
-        print(f"（其余 {len(bad_idx_list) - 3} 个见下标列表）")
-    assert boundary_result == (0, checked_num, []), f"分块边界校验不通过，实际结果：{boundary_result},本次分隔符为{SEPARATORS}"
-
-    # 哨兵断言：少于2块不存在相邻对，本项校验无意义，禁止空跑
-    assert len(chunks) > 1, "重叠一致性校验空跑：分块后仅1块，无相邻块对可校验"
-    overlap_ok, overlap_bad_cnt, overlap_bad_idx = check_overlap_consistency(chunks, overlaps)
-    print(f"【重叠一致性校验】不匹配对数: {overlap_bad_cnt} | 坏块对下标: {overlap_bad_idx} | 本次的overlap参数:{overlap}")
-    assert overlap_ok, f"重叠一致性校验失败，不匹配块对下标：{overlap_bad_idx} | 本次的overlap参数:{overlap}"
-
-    no_loss_result = check_no_loss(chunks, demo_doc, overlaps)
-    no_loss_ok, restored_len, origin_len, diff_desc = no_loss_result
-    # ① 哨兵断言：块数必须 > 1，否则这个检查也是空跑
-    assert len(chunks) > 1, "无损校验空跑：分块后仅1块，无法验证重叠还原逻辑"
-    # ② 断言还原结果与原文完全一致，报错带上首个差异位置及其前后文，避免只报长度时定位不到
-    assert no_loss_ok, f"分块无损校验失败：{diff_desc} | 还原后长度 {restored_len} | 原文长度 {origin_len} | 本次的overlap参数:{overlap}"
-
-    print(f"【分块无损校验】还原一致: {no_loss_ok} | 首个差异: {diff_desc} | 还原长度: {restored_len} | 原文长度: {origin_len} | 本次的overlap参数:{overlap}")
-
-    vector_store: list[ChunkItem] = []
-    for c in chunks:
-        emb = model.encode(c).tolist()
-        vector_store:list[ChunkItem] = []
-        for i ,c in enumerate(chunks):
-            emb = model.encode(c).tolist()
-            vector_store.append(ChunkItem(pos=positions[i],vector=emb))
+    # ===== 第二段：全局级 =====
+    chunks = [p.text for p in all_positions]
+    vectors = model.encode(chunks, batch_size=32).tolist()  # 顺手修掉 O(n²)
+    assert len(vectors) == len(all_positions), "向量数与块数不匹配"
+    vector_store = [ChunkItem(pos=p, vector=v) for p, v in zip(all_positions, vectors)]
 
     query = "什么是RAG？"
-    retrieved = retrieve(query, model, vector_store, top_k=2)
+    retrieved = retrieve(query, model, vector_store, top_k=3)
 
     print(f"【检索命中】query = {query!r}")
     for it in retrieved:
         p = it.pos
-        print(f"  · 第 {row_num(demo_doc, p.start)}–{row_num(demo_doc, p.end - 1)} 行 "
-               f"· {p.header} · 片段: {p.text[:28]!r}…")
+        t = path2text[p.source]  # ← 用那块自己的文件算行号
+        print(f"  · {Path(p.source).name} · 第 {row_num(t, p.start)}–{row_num(t, p.end - 1)} 行 "
+              f"· {p.header} · 片段: {p.text[:28]!r}…")
 
     system_prompt = "你是知识库问答助手，请依据下面参考文档回答用户问题，如果文档没有答案就如实说明，禁止编造幻觉内容。"
     MODEL_MAX_WINDOW = 4096
