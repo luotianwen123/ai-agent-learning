@@ -89,6 +89,11 @@ def load_docs(root: Path = ROOT) -> tuple[list[dict], list[tuple[str, str]], int
             errors.append((str(p), f"不是合法 UTF-8：{e}"))
             continue
 
+        # 空文档过滤：判据是 not text.strip() —— 只有空白/换行也算空（不是 len(text) == 0）
+        if not text.strip():
+            errors.append((str(p), "空文档：解码后只有空白字符（not text.strip()）"))
+            continue
+
         docs.append({"path": str(p), "text": text})
 
     return docs, errors, bom_files

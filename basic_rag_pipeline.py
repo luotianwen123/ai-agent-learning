@@ -69,8 +69,6 @@ def recursive_split(text: str, max_chunk_size: int, overlap: int, _raw: bool = F
 
     # 原始无重叠块上限：预留重叠空间，拼接后刚好等于max_chunk_size
     raw_chunk_max = max_chunk_size - overlap
-    if len(text) <= raw_chunk_max:
-        return [text]
 
     all_chunks = []
     found_split = False
