@@ -14,6 +14,7 @@
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
 - `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环；挂 `SqliteSaver` checkpointer 把状态落盘、支持跨轮对话记忆；并对「同一工具连续重复调用」做熔断（`repeat_count`）
+- `eval_rag.py`：**评测基线** —— 固定 10 题评测集（每题标注标准答案所在文件 gold），对全库 top-3 检索按「top-3 中是否有块来自 gold 文件」统计 **Recall@3**。[!] 当前是**文件级**判定：它回答「召回对了文件没有」，不回答「召回的那块正文里有没有答案」；块级判定（正文可回答 / 是否被 frontmatter 污染）尚未落地，局限见文末「变更卡 05」，不做过度声明。
 - `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）。四练的定位与对照实验详见 [`practice/README.md`](practice/README.md)
 
 ### 📦 项目依赖
@@ -95,7 +96,7 @@ python basic_rag_pipeline.py
 ⚠️ 四点注意：
 - 首次运行会自动下载 embedding 模型 `BAAI/bge-small-zh-v1.5`（约 100MB），需要联网等待。国内网络慢时，在 `.env` 里配 `HF_ENDPOINT=https://hf-mirror.com` 走镜像。
 - **`.env` 必须在所有第三方库 import 之前加载**：`huggingface_hub` 在模块导入时就会读取 `HF_ENDPOINT` 并存入常量，之后才调 `load_dotenv()` 已经太晚，镜像不会生效。调整 import 顺序时别把这个先后关系弄反。
-- 当前为演示脚本，待检索的文档（`demo_doc`）和用户问题（`query`）写死在 `__main__` 中。想换内容直接改这两处变量即可。
+- 语料来自 `notes_loader` 扫描的笔记库**全库正文**（不再写死 demo 文本）；`__main__` 里只写死 `query`（检索问题）和 `max_chunk_size / overlap` 两个参数，换问题改 `query` 即可。
 - 脚本会打印组装完成的完整 Prompt，并调用大模型输出最终回答。
 
 **③ `simple_agent_demo.py` —— 带持久化记忆的对话客户端**
@@ -129,6 +130,18 @@ python tool_agent_langgraph.py
 ```
 
 复用 `tool_agent.py` 的全部工具定义、工具映射、重试装饰器与最大步数配置，改用 LangGraph `StateGraph` 搭建推理循环：`messages` 用 `Annotated[list, add_messages]` 让框架自动追加、`route_agent` 条件边判断「继续调工具 / 终止」，再挂 `SqliteSaver` checkpointer（状态落在脚本同目录的 `checkpoints.sqlite`，路径用 `os.path.dirname(os.path.abspath(__file__))` 锚定、不受启动目录影响）、靠同一个 `thread_id` 让多次 `invoke` 共享记忆。另对「同一工具连续重复调用」做熔断：连续超过 `MAX_REPEAT`（默认 3）次即走 `finish_repeat_limit` 收尾，第 4 次请求不再执行。需额外安装 `langchain-openai`、`langgraph`。
+
+**⑤ `eval_rag.py` —— 评测基线（Recall@3）**
+
+```bash
+python eval_rag.py
+```
+
+先跑 `notes_loader` + `build_corpus` 建全库块，再对 10 道固定题逐题检索 top-3，打印每题的「期望文件 / 实得文件」与 PASS / FAIL，最后输出 `Recall@3`。
+
+[!] 两点如实说明：
+- **判定粒度是「文件级」**：只要 top-3 里有一块的来源文件名在 gold 列表里就算命中 —— 它回答的是「召回对了文件没有」，**不回答「召回的那块里有没有答案」**。
+- 因此它**看不见内容层面的改善**：frontmatter 清理后块变干净了，但召回的文件没变 ⇒ 数字不动（80% → 80%）。块级判定是下一步。
 
 ### 5. 常见问题
 | 现象 | 原因与处理 |
@@ -269,3 +282,15 @@ python tool_agent_langgraph.py
 - **改了什么**：分块返回值从 `list[str]` 升级为 `list[ChunkPosition]`（`text` + 7 个元数据字段），并在循环里用 `cursor` 游标顺推位置；`@dataclass(frozen=True)` **硬冻结**。
 - **为什么**：RAG 需要的每一种「关于内容的信息」（从哪来、在哪、属于哪节、有没有被截断）**只在分块那一刻产生，之后再也算不回来** —— 载体必须换成「内容 + 坐标 + 出身」的对象。硬冻结保护的是**坐标这一事实**（三条不变量）不被事后偷改；要改字段只能走 `dataclasses.replace()` 派生新对象。
 - **怎么验证**：三不变量可自证（`原文[start:end] == text` / 末块贴尾 / 首块贴零，代码里就是那两条 `assert`）；坏块 39 → `原文[3698,3822)` → **第 146–148 行 ·《八、📌 债清单》**。
+
+### 变更卡 04 · frontmatter 清理（空格占位，不删字）
+- **改了什么**：`build_corpus()` 每篇分块前，若 `text.startswith("---")` 且能找到闭合 `\n---`，把 frontmatter 整段替换为**等长空格**；找不到闭合则原样处理（不报错，也不静默吞掉整篇）。
+- **为什么**：frontmatter 的 `tags / 类型 / 来源 / 关联` 主题词密度极高，向量化后会占住 top-1~3 的高分位。10-18 实测：问「什么是RAG？」，返回的 top-3 全是 frontmatter 残片与 markdown 表格分隔线，模型只能诚实拒答。
+- **为什么用空格占位而不是删掉**：删掉会让本文件之后所有 `start / end / 行号` 整体前移 ⇒ 出处全错，而且**完全不报错**（静默错）；`ChunkPosition` 的三条不变量（`原文[start:end]==text` / 末块贴尾 / 首块贴零）会当场失效。空格占位**长度不变** ⇒ 位置不失真，同时 frontmatter 不再参与语义打分。
+- **怎么验证**：全库块数 **2888 → 2878**（frontmatter 变成连续空格，段内分隔符消失，切分点少 10 处）；块坐标仍可对回原文。
+
+### 变更卡 05 · Eval 基线（10 题 · Recall@3）
+- **改了什么**：新增 `eval_rag.py` —— 固定 10 题 + 每题 gold 文件列表，`top_k=3`，按「命中文件名 ∈ gold」统计 Recall@3。
+- **为什么**：四道校验只回答「管道通不通」，不回答「检索对不对」；没有指标时，任何一次改动都无法验收（10-14 之后一周的改动全部说不清是变好还是变坏）。
+- **怎么验证**：本机实测 `Recall@3 = 8/10 = 80%`；其中 Q8（删掉 Observation 后为何第一反应是 API 报错）、Q9（`done` 字段为何用 `not`）判 FAIL，实得文件与 gold 无关。
+- **[!] 已知局限（写在这里，不藏着）**：判定是**文件级** —— top-3 只要有一块来自 gold 文件就算命中，**看不见「块内容是垃圾」**。frontmatter 清理前后 Recall@3 都是 80%，正是这个盲区的直接证据。块级判定（正文是否真能回答 / 是否被污染）为下一步。

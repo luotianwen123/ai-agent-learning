@@ -396,6 +396,14 @@ def build_corpus(docs: list[dict], max_chunk_size: int, overlap: int):
         name = Path(d["path"]).name
         text = d["text"]
 
+        # frontmatter 清理：用【空格占位】而不是删掉。
+        # 删了会让本文件所有 start/end/行号整体前移，出处全错且不报错（静默错）；
+        # 空格占位长度不变，位置对得上。frontmatter 主题词密度高，会抢检索的高分位。
+        if text.startswith("---"):
+            end = text.find("\n---", 3)
+            if end != -1:
+                text = " " * (end + 4) + text[end + 4:]
+
         ps = recursive_split(text, max_chunk_size=max_chunk_size, overlap=overlap)
         # header 用【这一篇的】text 算；source 一起补（否则 50 篇混完就分不清来源）
         ps = [replace(p, header=subsection_location(text, p.start), source=d["path"]) for p in ps]
