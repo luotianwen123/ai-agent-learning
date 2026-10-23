@@ -17,6 +17,8 @@
 - `eval_rag.py`：**评测基线** —— 固定 10 题评测集（每题标注标准答案所在文件 gold），对全库 top-3 检索按「top-3 中是否有块来自 gold 文件」统计 **Recall@3**。[!] 当前是**文件级**判定：它回答「召回对了文件没有」，不回答「召回的那块正文里有没有答案」；块级判定（正文可回答 / 是否被 frontmatter 污染）尚未落地，局限见文末「变更卡 05」，不做过度声明。
 - `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）。四练的定位与对照实验详见 [`practice/README.md`](practice/README.md)
 
+- `FAST_API.py`：**RAG 服务化入口** —— 把 `basic_rag_pipeline.py` 的六环包成 `POST /ask`，一次请求完成「检索 → 组装 → 生成 → 带出处返回」。**全局装载区与请求区严格分开**：语料加载 / 分块 / 向量化只在启动时跑一次（`build_corpus` + 批量 `encode`），检索 / 裁剪 / 组装 / 生成每次请求跑一次。返回体含 `answer` 与 `sources`（文件名 + 行号 + 标题），`sources` 在**裁剪上下文之前**采集，避免块被截断后丢失出处。实测：语料 56 篇、单次请求 1.3 秒、返回 5 条出处。
+
 ### 📦 项目依赖
 - `sentence-transformers>=2.7.0`
 - `numpy>=1.26.0`
@@ -25,6 +27,8 @@
 - `python-dotenv`
 - `langchain-openai`
 - `langgraph`
+- `fastapi`
+- `uvicorn`
 
 ---
 
@@ -46,7 +50,7 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv langchain-openai langgraph
+pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv langchain-openai langgraph fastapi uvicorn
 ```
 
 ### 3. 配置 API Key
@@ -56,7 +60,13 @@ pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests pyt
 OPENAI_API_KEY=你的_DeepSeek_API_Key
 # 可选：国内直连 HuggingFace 缓慢时走镜像（basic_rag_pipeline.py 首次运行要下模型）
 HF_ENDPOINT=https://hf-mirror.com
+# 模型已缓存到本地后建议开启：跳过启动时的联网版本检查
+# 不开的话，镜像响应慢会表现为「程序停在分块日志后不动、CPU 0%、不报错」——见「变更卡 06」
+HF_HUB_OFFLINE=1
 ```
+
+> ⚠️ `HF_HUB_OFFLINE` 必须在**所有第三方 import 之前**生效。本项目靠 `load_dotenv()` 写在 `FAST_API.py` 第一行的顺序保证；写到别处会失效（库已经把配置读走了）。
+> 部署到**没有本地模型缓存**的服务器时，这个变量要反过来去掉，否则会直接报找不到模型。
 
 > `.env`、`config.json`、`history.json` 均已在 `.gitignore` 中，不会被提交。
 
@@ -143,6 +153,38 @@ python eval_rag.py
 - **判定粒度是「文件级」**：只要 top-3 里有一块的来源文件名在 gold 列表里就算命中 —— 它回答的是「召回对了文件没有」，**不回答「召回的那块里有没有答案」**。
 - 因此它**看不见内容层面的改善**：frontmatter 清理后块变干净了，但召回的文件没变 ⇒ 数字不动（80% → 80%）。块级判定是下一步。
 
+**⑥ `FAST_API.py` —— RAG 服务化入口（POST /ask）**
+
+```bash
+python FAST_API.py
+```
+
+启动后有两处可以验证：
+
+```bash
+# ① 交互式接口文档（能看到 POST /ask）
+http://127.0.0.1:8000/docs
+
+# ② 直接发请求
+curl -X POST "http://127.0.0.1:8000/ask?q=什么是RAG%EF%BC%9F"
+```
+
+返回体结构：
+
+```json
+{
+  "answer": "……",
+  "sources": [
+    {"file_name": "面试真题清单.md", "row_num": 159, "header": "### 10/6 · 主题：语料加载层与位置溯源"}
+  ]
+}
+```
+
+三点注意：
+- **启动日志刷完后终端会停住，这是对的**。`uvicorn` 接管了主线程，之后不再有任何输出。判据不是「光标回来了」，而是 `Uvicorn running on http://127.0.0.1:8000` 这行出现 + `/docs` 能打开 + **发一次真实请求拿到 `answer`**。退出码 `0` 和满屏日志都**不能**证明服务起来了（详见「变更卡 06」）。
+- **`pip install fastapi` 不会装上 `uvicorn`**。FastAPI 只负责路由和参数校验，真正监听端口的是 uvicorn，必须单独安装。
+- 单次请求实测 **1.3 秒**（语料 56 篇、top-5 出处），耗时主要在 DeepSeek 生成的网络往返。
+
 ### 5. 常见问题
 | 现象 | 原因与处理 |
 | --- | --- |
@@ -151,6 +193,10 @@ python eval_rag.py
 | 首次运行卡住 / 下载缓慢 | 正在拉取 embedding 模型。直连 HuggingFace 慢时在 `.env` 配置 `HF_ENDPOINT=https://hf-mirror.com` 走镜像；注意 `load_dotenv()` 必须排在第三方库 import 之前才会生效 |
 | 已配 `HF_ENDPOINT` 但仍在直连 HuggingFace | import 顺序反了，见运行步骤 ② 的第 2 条注意 |
 | 调用报网络错误 | 脚本对临时性网络错误做了延迟重试；持续失败请检查 API Key 余额与网络代理 |
+| `ModuleNotFoundError: No module named 'uvicorn'` | `pip install fastapi` 不带服务器。补装：`pip install uvicorn` |
+| **程序停在分块日志后不动、不报错、CPU 0%** | 卡在 HuggingFace 启动时的联网版本检查（镜像响应慢时静默阻塞）。在 `.env` 加 `HF_HUB_OFFLINE=1`，模型已在本地缓存时走离线模式。定位手法见「变更卡 06」 |
+| `/ask` 返回中文显示成 `æ ¹æ®åèæ¡£` | **不是服务的 bug**，是客户端解码问题。PowerShell 的 `Invoke-RestMethod` 默认按非 UTF-8 解码；用 Python `raw.decode("utf-8")` 或浏览器 `/docs` 发同样请求即可验证 |
+| 服务"卡死"却查不出原因 | 按三步切：① CPU 累计值 4 秒增量是否为 0（0 = 在等，不是慢）② 进程有无 `Established` 外网连接（有 = 卡在网络）③ 端口有无 Listen（有 = **其实已经启动成功**，`uvicorn` 本来就不输出） |
 
 ---
 
@@ -294,3 +340,13 @@ python eval_rag.py
 - **为什么**：四道校验只回答「管道通不通」，不回答「检索对不对」；没有指标时，任何一次改动都无法验收（10-14 之后一周的改动全部说不清是变好还是变坏）。
 - **怎么验证**：本机实测 `Recall@3 = 8/10 = 80%`；其中 Q8（删掉 Observation 后为何第一反应是 API 报错）、Q9（`done` 字段为何用 `not`）判 FAIL，实得文件与 gold 无关。
 - **[!] 已知局限**：判定是**文件级** —— top-3 只要有一块来自 gold 文件就算命中，**看不见「块内容是垃圾」**。frontmatter 清理前后 Recall@3 都是 80%，正是这个盲区的直接证据。块级判定（正文是否真能回答 / 是否被污染）为下一步。
+
+### 变更卡 06 · RAG 服务化（`FAST_API.py` · `POST /ask`）
+- **改了什么**：新增 `FAST_API.py`，把六环包成 HTTP 接口。**装载区**（语料加载 / 分块 / 批量 `encode`）只在启动时跑一次；**请求区**（检索 / 裁剪 / 组装 / 生成）每次请求跑一次。`sources` 采集刻意放在**裁剪上下文之前** —— `clip_context_by_max_token` 会把块收成 `str` 返回，之后 `pos`（里面的 `source` / `start` / `header`）就再也取不回来了。
+- **为什么**：前三个产出都是「能跑但点不开」，对方无法验证，等于不存在。服务化是「能点开」这一条的唯一解法，也是脚本与工程的分界线。
+- **怎么验证**：三道判据全过 —— ① `Uvicorn running on http://127.0.0.1:8000` 且进程不退 ② `/docs` 返回 `200` ③ `POST /ask?q=什么是RAG？` 返回 `answer` + **5 条** `sources`（文件名 + 行号 + 标题），实测 **1.3 秒**。
+- **[!] 过程中踩到的四个坑（记下来，因为定位过程比功能本身更能说明工程能力）**：
+  1. **退出码 `0` ≠ 服务已启动**：缺 `if __name__ == "__main__": uvicorn.run(...)`，脚本执行完装载区就自然结束，`/ask` 一次都没被调用过。**满屏日志 + 退出码 0，比完全不跑更能骗人。**
+  2. **`pip install fastapi` 不带 `uvicorn`**：FastAPI 只负责路由、参数校验、序列化；监听端口的是独立安装的 ASGI 服务器。
+  3. **`list[dict]` 冒充 `list[ChunkItem]`**：`retrieve()` 读的是 `item.vector`（点号），dict 只能 `item["vector"]`（方括号）。类型不对**不在启动时炸，只在第一次请求时炸** —— 而它被坑 1（服务根本没起）完美掩盖了。
+  4. **`HF_ENDPOINT` 镜像响应慢导致启动静默挂死**：`sentence-transformers` 启动时会向 HuggingFace 询问模型是否有新版本，网络卡住时表现为「不报错、不退、CPU 0%」。定位靠三步：**① CPU 累计值 4 秒增量是否为 0**（0 = 在等，不是慢）**② 进程有无 `Established` 外网连接**（有 = 卡在网络）**③ 端口有无 Listen**（有 = 其实早已启动成功，`uvicorn` 接管主线程后本来就不再输出）。修法：模型已本地缓存时设 `HF_HUB_OFFLINE=1`，让启动不依赖网络。
