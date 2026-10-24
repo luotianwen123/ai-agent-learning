@@ -294,7 +294,7 @@ def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return float(dot / (norm_a * norm_b))
 
 
-def retrieve(query: str, model, vector_store: list[ChunkItem], top_k: int = 2) -> list[ChunkItem]:
+def retrieve(query: str, model, vector_store: list[ChunkItem], top_k: int = 5) -> list[ChunkItem]:
     top_k = min(top_k, len(vector_store))
     q_emb = model.encode(query)
     score_list = []
@@ -469,7 +469,7 @@ if __name__ == "__main__":
     vector_store = [ChunkItem(pos=p, vector=v) for p, v in zip(all_positions, vectors)]
 
     query = "什么是RAG？"
-    retrieved = retrieve(query, model, vector_store, top_k=3)
+    retrieved = retrieve(query, model, vector_store, top_k=5)
 
     print(f"【检索命中】query = {query!r}")
     for it in retrieved:

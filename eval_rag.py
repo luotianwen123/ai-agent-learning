@@ -16,7 +16,8 @@ vectors = model.encode([p.text for p in positions],batch_size=32).tolist()
 print(f"向量数={len(vectors)}")
 
 store = [ChunkItem(pos=p, vector=v) for p, v in zip(positions, vectors)]
-result = retrieve("什么是RAG？",model,store,top_k=3)
+K=5
+result = retrieve("什么是RAG？",model,store,top_k=K)
 for i,it in enumerate(result,1):
     print(f"TOP{i} {it.pos.source} [{it.pos.start},{it.pos.end}]")
 
@@ -34,7 +35,7 @@ EVAL_SET = [
 
 hit = 0
 for q, gold in EVAL_SET:
-    res = retrieve(q, model, store, top_k=3)
+    res = retrieve(q, model, store, top_k=K)
     got = [Path(it.pos.source).name for it in res]
     ok = any(g in got for g in gold)
     hit += 1 if ok else 0
@@ -42,4 +43,4 @@ for q, gold in EVAL_SET:
     print("   期望:", gold)
     print("   实得:", got)
 
-print(f"\nRecall@3 = {hit}/{len(EVAL_SET)} = {hit / len(EVAL_SET) * 100:.0f}%")
+print(f"\nRecall@{K} = {hit}/{len(EVAL_SET)} = {hit / len(EVAL_SET) * 100:.0f}%")

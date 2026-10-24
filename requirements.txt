@@ -1,0 +1,14 @@
+# 直接安装：pip install -r requirements.txt
+# 实测环境：Python 3.12（2026-10-24）。下面的版本号是「本机实测通过」的实际版本，
+# 约束写 >= 是为了不在别人的机器上强绑具体小版本；遇到问题按注释里的实测版本对齐。
+# torch / transformers 由 sentence-transformers 自动带入，不单独列（各自的版本随平台变化很大）。
+
+sentence-transformers>=2.7.0    # 实测 6.0.0（embedding 模型 BAAI/bge-small-zh-v1.5）
+numpy>=1.26.0                   # 实测 2.5.2（余弦相似度计算）
+tiktoken>=0.7.0                 # 实测 0.14.0（上下文裁剪时数 token）
+requests>=2.31.0                # 实测 2.34.2（tool_agent 的天气 API）
+python-dotenv>=1.0.0            # 实测 1.2.3（.env 加载，注意必须在第三方 import 之前）
+langchain-openai>=0.2.0         # 实测 1.6.0（tool_agent_langgraph 的 ChatOpenAI 封装）
+langgraph>=0.2.0                # 实测 1.2.11（StateGraph + SqliteSaver checkpointer）
+fastapi>=0.110.0                # 实测 0.161.1（路由层，不含服务器）
+uvicorn>=0.29.0                 # 实测 0.54.0（真正监听端口的 ASGI 服务器，必须单独装）

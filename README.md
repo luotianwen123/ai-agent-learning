@@ -20,15 +20,8 @@
 - `FAST_API.py`：**RAG 服务化入口** —— 把 `basic_rag_pipeline.py` 的六环包成 `POST /ask`，一次请求完成「检索 → 组装 → 生成 → 带出处返回」。**全局装载区与请求区严格分开**：语料加载 / 分块 / 向量化只在启动时跑一次（`build_corpus` + 批量 `encode`），检索 / 裁剪 / 组装 / 生成每次请求跑一次。返回体含 `answer` 与 `sources`（文件名 + 行号 + 标题），`sources` 在**裁剪上下文之前**采集，避免块被截断后丢失出处。实测：语料 56 篇、单次请求 1.3 秒、返回 5 条出处。
 
 ### 📦 项目依赖
-- `sentence-transformers>=2.7.0`
-- `numpy>=1.26.0`
-- `tiktoken`
-- `requests`
-- `python-dotenv`
-- `langchain-openai`
-- `langgraph`
-- `fastapi`
-- `uvicorn`
+见根目录 **`requirements.txt`**（唯一真源，不要在别处再抄一份版本清单 —— 两份清单必然漂移）。
+核心：`sentence-transformers`（向量化）、`numpy`（余弦相似度）、`tiktoken`（上下文裁剪）、`fastapi` + `uvicorn`（服务化）、`langgraph` + `langchain-openai`（状态图版 Agent）。
 
 ---
 
@@ -41,7 +34,7 @@ cd ai-agent-learning
 ```
 
 ### 2. 环境准备
-建议 Python 3.9+。仓库未提供 `requirements.txt`，需手动安装以下依赖：
+建议 Python 3.9+（本仓库已用 **3.12** 实测）。依赖见根目录 `requirements.txt`：
 
 ```bash
 python -m venv .venv
@@ -50,8 +43,10 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install "sentence-transformers>=2.7.0" "numpy>=1.26.0" tiktoken requests python-dotenv langchain-openai langgraph fastapi uvicorn
+pip install -r requirements.txt
 ```
+
+> 首次装 `sentence-transformers` 会连带拉入 `torch`，体积较大（数百 MB）。国内网络慢时先配 `pip` 镜像。
 
 ### 3. 配置 API Key
 四个模块均调用 DeepSeek API（模型 `deepseek-chat`）。在项目根目录新建 `.env` 文件：
@@ -147,11 +142,11 @@ python tool_agent_langgraph.py
 python eval_rag.py
 ```
 
-先跑 `notes_loader` + `build_corpus` 建全库块，再对 10 道固定题逐题检索 top-3，打印每题的「期望文件 / 实得文件」与 PASS / FAIL，最后输出 `Recall@3`。
+先跑 `notes_loader` + `build_corpus` 建全库块，再对 10 道固定题逐题检索 top-K，打印每题的「期望 / 实得」与 PASS / FAIL，最后输出 `Recall@K`。**K 是脚本顶部的常量（2026-10-24 起 `K = 5`）**，改 K 会直接改变分数 —— 见「变更卡 07」。
 
 ⚠️ 两点如实说明：
 - **判定粒度是「文件级」**：只要 top-3 里有一块的来源文件名在 gold 列表里就算命中 —— 它回答的是「召回对了文件没有」，**不回答「召回的那块里有没有答案」**。
-- 因此它**看不见内容层面的改善**：frontmatter 清理后块变干净了，但召回的文件没变 ⇒ 数字不动（80% → 80%）。块级判定是下一步。
+- 因此它**看不见内容层面的改善**：frontmatter 清理后块变干净了，但召回的文件没变 ⇒ 数字不动（@3 下 80% → 80%）。块级判定是下一步。
 
 **⑥ `FAST_API.py` —— RAG 服务化入口（POST /ask）**
 
@@ -339,6 +334,7 @@ curl -X POST "http://127.0.0.1:8000/ask?q=什么是RAG%EF%BC%9F"
 - **改了什么**：新增 `eval_rag.py` —— 固定 10 题 + 每题 gold 文件列表，`top_k=3`，按「命中文件名 ∈ gold」统计 Recall@3。
 - **为什么**：四道校验只回答「管道通不通」，不回答「检索对不对」；没有指标时，任何一次改动都无法验收（10-14 之后一周的改动全部说不清是变好还是变坏）。
 - **怎么验证**：本机实测 `Recall@3 = 8/10 = 80%`；其中 Q8（删掉 Observation 后为何第一反应是 API 报错）、Q9（`done` 字段为何用 `not`）判 FAIL，实得文件与 gold 无关。
+- ⏱ **口径变更说明**：本卡数字是 `K=3` 时的历史值。2026-10-24 起脚本改为 `K=5`，同一套题得 `Recall@5 = 9/10 = 90%`。**@3 与 @5 不可直接比较**（K 越大越容易命中），对照请用同一 K。详见「变更卡 07」。
 - **⚠️ 已知局限**：判定是**文件级** —— top-3 只要有一块来自 gold 文件就算命中，**看不见「块内容是垃圾」**。frontmatter 清理前后 Recall@3 都是 80%，正是这个盲区的直接证据。块级判定（正文是否真能回答 / 是否被污染）为下一步。
 
 ### 变更卡 06 · RAG 服务化（`FAST_API.py` · `POST /ask`）
@@ -350,3 +346,13 @@ curl -X POST "http://127.0.0.1:8000/ask?q=什么是RAG%EF%BC%9F"
   2. **`pip install fastapi` 不带 `uvicorn`**：FastAPI 只负责路由、参数校验、序列化；监听端口的是独立安装的 ASGI 服务器。
   3. **`list[dict]` 冒充 `list[ChunkItem]`**：`retrieve()` 读的是 `item.vector`（点号），dict 只能 `item["vector"]`（方括号）。类型不对**不在启动时炸，只在第一次请求时炸** —— 而它被坑 1（服务根本没起）完美掩盖了。
   4. **`HF_ENDPOINT` 镜像响应慢导致启动静默挂死**：`sentence-transformers` 启动时会向 HuggingFace 询问模型是否有新版本，网络卡住时表现为「不报错、不退、CPU 0%」。定位靠三步：**① CPU 累计值 4 秒增量是否为 0**（0 = 在等，不是慢）**② 进程有无 `Established` 外网连接**（有 = 卡在网络）**③ 端口有无 Listen**（有 = 其实早已启动成功，`uvicorn` 接管主线程后本来就不再输出）。修法：模型已本地缓存时设 `HF_HUB_OFFLINE=1`，让启动不依赖网络。
+
+### 变更卡 07 · 评测口径 `K=3 → 5`（Recall@K 可调）
+- **改了什么**：`eval_rag.py` 把检索条数抽成常量 `K = 5`（原来两处写死 `top_k=3`），输出从 `Recall@3` 改为 `Recall@{K}`；`basic_rag_pipeline.retrieve()` 的默认 `top_k` 由 `2` 改为 `5`，`__main__` 里演示查询同步 `top_k=5`。
+- **为什么**：评测集（10 题）和 K 必须解耦。原来 3 写在两个地方，改一处忘一处会得到两套口径；抽成常量后「改 K」只动一行，且输出标题自动跟着变，不会出现「标题写 @3、实际按 @5 算」这种静默错。
+- **怎么验证**：本机实跑 `python eval_rag.py`
+  - 语料：`扫描 90 篇 → 入选 59 / 排除 31`；`docs=57 errors=2`（2 篇不是合法 UTF-8，已跳过并报告，不静默丢）
+  - `Recall@5 = 9/10 = 90%`：Q1–Q7 PASS、Q10 PASS；Q8（删 Observation 后为何 API 报错）FAIL；**Q9（`done` 字段为何用 `not`）由 @3 的 FAIL 转 PASS**
+  - 旧口径对照：`Recall@3 = 8/10 = 80%`
+- **⚠️ 结论必须看清这一条**：`80% → 90%` **不是检索变好了**，是**尺子变松了** —— K 从 3 提到 5，多给两个位置，命中概率自然上升。两个数字**不可直接比较**，也不能拿去证明 frontmatter 清理有效（那次是 80%→80%，本来就没动）。
+- **下一步**：真正能反映改善的是**块级判定**（该块正文里有没有答案 / 是不是 frontmatter 污染），不是把 K 调大。
