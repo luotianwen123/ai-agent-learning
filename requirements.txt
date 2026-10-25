@@ -12,3 +12,5 @@ langchain-openai>=0.2.0         # 实测 1.6.0（tool_agent_langgraph 的 ChatOp
 langgraph>=0.2.0                # 实测 1.2.11（StateGraph + SqliteSaver checkpointer）
 fastapi>=0.110.0                # 实测 0.161.1（路由层，不含服务器）
 uvicorn>=0.29.0                 # 实测 0.54.0（真正监听端口的 ASGI 服务器，必须单独装）
+chromadb>=0.5.0                 # 实测 1.5.9（向量持久化。⚠️ 库目录必须放纯英文路径，
+                                #   1.x 是 Rust 后端，路径含中文会导致索引读不出来：Error loading hnsw index）

@@ -2,16 +2,21 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
+
+# 必须在 sentence_transformers 之前，否则它会去 huggingface.co 查更新 → WinError 10060
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+import time
+
+_T0 = time.perf_counter()  # 量启动耗时，从这一行开始算
+
 from fastapi import FastAPI
 from pathlib import Path
 import tiktoken
 from sentence_transformers import SentenceTransformer
 from notes_loader import load_docs
 from basic_rag_pipeline import (
-    build_corpus,
-    ChunkPosition,
-    ChunkItem,  # ① 补充分块向量条目类型
-    retrieve,
     row_num,
     calc_available_chunk_quota,
     clip_context_by_max_token,
@@ -19,8 +24,9 @@ from basic_rag_pipeline import (
     llm_chat,
     API_KEY,
     BASE_URL,
-    MODEL
+    MODEL,
 )
+from chroma_store import search_as_chunks, DB_PATH, COLLECTION, _get_collection
 import uvicorn
 
 app = FastAPI()
@@ -30,21 +36,22 @@ docs, _, _ = load_docs()
 path2text = {d["path"]: d["text"] for d in docs}
 embedding_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
 tokenizer = tiktoken.get_encoding("cl100k_base")
-all_positions, report, failures = build_corpus(docs, 150, 30)
-assert not failures, f"文档分块校验失败: {failures}"
 
-# ========== ② 替换为标准向量库构建（批量编码+ChunkItem封装，四行结构） ==========
-embeddings = embedding_model.encode([p.text for p in all_positions], normalize_embeddings=True)
-vector_store = [
-    ChunkItem(pos=p, vector=e)
-    for p, e in zip(all_positions, embeddings)
-]
+# ========== 向量库：从磁盘上的 Chroma 读，不再每次重算 ==========
+# 改动前：启动时要 build_corpus + encode 3193 个块，几十秒
+# 改动后：只打开磁盘上的索引，毫秒级 —— 向量在建库时算过一次就够了
+_col = _get_collection(DB_PATH, COLLECTION)
+_INDEX_SIZE = _col.count()
+if _INDEX_SIZE == 0:
+    raise RuntimeError("向量库是空的，先跑一次 chroma_build.py")
+print(f"【向量库】已加载 {_INDEX_SIZE} 条  ← {DB_PATH}")
+print(f"【启动耗时】{time.perf_counter() - _T0:.2f} 秒")
 
 
 @app.post("/ask")
 def ask(q: str):
-    # 检索：签名 retrieve(query, model, vector_store, top_k)
-    hit_chunks = retrieve(q, embedding_model, vector_store, top_k=5)
+    # 检索：改成从磁盘上的 Chroma 查（返回的仍是 list[ChunkItem]，下游不用改）
+    hit_chunks = search_as_chunks(q, embedding_model, top_k=5)
 
     # 出处信息
     sources = [

@@ -14,10 +14,14 @@
       - ✅ 内层递归只负责切分文本，不再重复叠加重叠区域，大幅减少冗余文本，同时避免重复参数校验，提升分块精度与执行效率。
 - `tool_agent.py`：无框架手写 ReAct Agent（DeepSeek API + Function Calling），完整实现工具调用循环、分层重试、边界容错
 - `tool_agent_langgraph.py`：LangGraph `StateGraph` 版 ReAct Agent，复用 `tool_agent.py` 的工具定义/映射/重试，改用状态图（`add_messages` 自动归并消息 + 条件边路由）实现推理循环；挂 `SqliteSaver` checkpointer 把状态落盘、支持跨轮对话记忆；并对「同一工具连续重复调用」做熔断（`repeat_count`）
-- `eval_rag.py`：**评测基线** —— 固定 10 题评测集（每题标注标准答案所在文件 gold），对全库 top-3 检索按「top-3 中是否有块来自 gold 文件」统计 **Recall@3**。⚠️ 当前是**文件级**判定：它回答「召回对了文件没有」，不回答「召回的那块正文里有没有答案」；块级判定（正文可回答 / 是否被 frontmatter 污染）尚未落地，局限见文末「变更卡 05」，不做过度声明。
+- `eval_rag.py`：**评测基线** —— 固定 10 题评测集（每题标注标准答案所在文件 gold），对全库 **top-5** 检索按「top-5 中是否有块来自 gold 文件」统计 **Recall@5**（2026-10-25 由 K=3 调整为 K=5：实测 K=1/2/3/5/10 的召回曲线为 60%/70%/80%/**90%**/90%，K=5 是拐点，再加 K 不再提升）。⚠️ 当前是**文件级**判定：它回答「召回对了文件没有」，不回答「召回的那块正文里有没有答案」；块级判定（正文可回答 / 是否被 frontmatter 污染）尚未落地，局限见文末「变更卡 05」，不做过度声明。
+- `chroma_store.py`：**向量持久化层** —— `build_index()` 建库 / `search()` 检索 / `search_as_chunks()` 适配器。显式指定 `hnsw:space="cosine"`（`距离 = 1 - 余弦相似度`）；`search_as_chunks()` 把 Chroma 返回的 `(距离, 文本, 元数据)` 重新包装回 `ChunkItem`，做到**对外接口不变、只换实现**，因此 `/ask` 只改了一行。建库策略：整个目录 `rmtree` 重建 + 一次性 `add`（分批写会生成多个 segment，跨进程加载时只要有一个段读不出就整体失败）
+- `chroma_build.py`：建库脚本，跑一次即可（当前 57 篇 → **3193** 个块 → 512 维写入磁盘）
+- `chroma_compare.py`：**新旧检索对账** —— 拿内存版余弦实现当标准答案，比对 Chroma top-5 的「文件名 + 起始位置」，实测**完全一致**。这是「换库没改坏」的第一条证据；第二条是同口径下 `Recall@5` 换库前后均为 90%
+- `chroma_demo.py`：Chroma 最小可运行例子（3 条文本 + 建库 + 查询），用于先跑通再接项目
 - `practice/`：日常练习归档目录，按「专题_序号_名称」命名，不再散落在 PyCharm 工程里（当前 LangGraph 四练：`01` TypedDict 基础 → `02` 状态手动流转 → `03` StateGraph + add_messages → `03_Annotated` 在 03 基础上加 SqliteSaver，验证状态持久化）。四练的定位与对照实验详见 [`practice/README.md`](practice/README.md)
 
-- `FAST_API.py`：**RAG 服务化入口** —— 把 `basic_rag_pipeline.py` 的六环包成 `POST /ask`，一次请求完成「检索 → 组装 → 生成 → 带出处返回」。**全局装载区与请求区严格分开**：语料加载 / 分块 / 向量化只在启动时跑一次（`build_corpus` + 批量 `encode`），检索 / 裁剪 / 组装 / 生成每次请求跑一次。返回体含 `answer` 与 `sources`（文件名 + 行号 + 标题），`sources` 在**裁剪上下文之前**采集，避免块被截断后丢失出处。实测：语料 56 篇、单次请求 1.3 秒、返回 5 条出处。
+- `FAST_API.py`：**RAG 服务化入口** —— 把 `basic_rag_pipeline.py` 的六环包成 `POST /ask`，一次请求完成「检索 → 组装 → 生成 → 带出处返回」。**全局装载区与请求区严格分开**：语料加载只在启动时跑一次，检索 / 裁剪 / 组装 / 生成每次请求跑一次。**检索已改为从磁盘上的 Chroma 向量库读**（2026-10-25），不再每次启动重算 3193 个块的向量 —— 实测启动耗时由约 **120 秒降至 10 秒**（其中 90 秒来自「不再重算向量」，20 秒来自 tiktoken/磁盘缓存，剩余 10 秒是 `import torch` + 加载模型的固定成本）。返回体含 `answer` 与 `sources`（文件名 + 行号 + 标题），`sources` 在**裁剪上下文之前**采集，避免块被截断后丢失出处。
 
 ### 📦 项目依赖
 见根目录 **`requirements.txt`**（唯一真源，不要在别处再抄一份版本清单 —— 两份清单必然漂移）。
@@ -103,6 +107,18 @@ python basic_rag_pipeline.py
 - **`.env` 必须在所有第三方库 import 之前加载**：`huggingface_hub` 在模块导入时就会读取 `HF_ENDPOINT` 并存入常量，之后才调 `load_dotenv()` 已经太晚，镜像不会生效。调整 import 顺序时别把这个先后关系弄反。
 - 语料来自 `notes_loader` 扫描的笔记库**全库正文**（不再写死 demo 文本）；`__main__` 里只写死 `query`（检索问题）和 `max_chunk_size / overlap` 两个参数，换问题改 `query` 即可。
 - 脚本会打印组装完成的完整 Prompt，并调用大模型输出最终回答。
+
+**②.5 `chroma_build.py` —— 建向量库（跑服务前先跑一次，之后不用再跑）**
+
+```bash
+python chroma_build.py      # 建库 + 建完自检
+python chroma_compare.py    # 可选：和内存版对账，验证换库没改坏
+```
+
+⚠️ 三点注意（都是踩过的坑）：
+- **库目录必须放在纯英文路径**（默认 `~/chroma_notes_db`，可用环境变量 `CHROMA_DB_PATH` 覆盖）。Chroma 1.x 是 Rust 后端，**路径含中文会导致索引读不出来**，报错是 `Error loading hnsw index`；现象很迷惑 —— 同一个进程刚写完能查、换个进程就读不出来。
+- **库不进版本库**（已在 `.gitignore`）。笔记库内容变了要重新跑一次 `chroma_build.py`，否则服务查到的还是旧语料。
+- 判据不是「库里有多少条」，而是**换一个新进程去查，能不能查出东西**。`collection.count()` 读的是元数据表，索引没落盘它照样返回正确条数 —— 这是典型的假绿。
 
 **③ `simple_agent_demo.py` —— 带持久化记忆的对话客户端**
 
