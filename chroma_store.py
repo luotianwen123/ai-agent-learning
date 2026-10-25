@@ -7,7 +7,6 @@ chroma_store.py —— 把向量存到磁盘上的库（Chroma），提供"建�
   1. hnsw:space="cosine" —— 显式指定用余弦距离，避免默认 L2 带来的"越小越像/越大越像"混淆
      cosine 空间下： distance = 1 - 余弦相似度 ，范围 [0, 2]
   2. metadata 只能是 str / int / float / bool，不能是 None，所以 header 用 "" 兜底
-  3. 分批写入（BATCH=500），3178 条一次塞进去容易内存抖动
 """
 
 import os
