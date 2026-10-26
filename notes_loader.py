@@ -14,7 +14,10 @@ from pathlib import Path
 
 # 语料根目录：写【绝对路径】—— 相对路径的基准是"运行时的工作目录"，换个目录启动就会指向别处
 ROOT = Path(r"C:\Users\luotianwen\ai-agent-notes")
-EXCLUDE_DIRS = {".obsidian", "_附件", "99-原始存档", "07-求职复习", "98-代码变更卡"}
+# 2026-10-26 库重构（三大章）后改名：07-求职复习 → 91-求职与面试/复习材料；98-代码变更卡 → 02-RAG项目/04-变更卡
+# ⚠️ 这两个都能命中【嵌套】目录：is_excluded 比的是全部路径分段，不只是第一层
+# 03-变更卡 是约定③之后新建的（Agent 项目的修改记录），与 04-变更卡 同性质：过程产物，不进语料
+EXCLUDE_DIRS = {".obsidian", "_附件", "99-原始存档", "复习材料", "04-变更卡", "03-变更卡"}
 
 
 
@@ -61,9 +64,13 @@ def load_docs(root: Path = ROOT) -> tuple[list[dict], list[tuple[str, str]], int
     print(f"【语料过滤】扫描 {len(md_files) + len(dropped)} 篇 → 入选 {len(md_files)} 篇"
           f"｜排除 {len(dropped)} 篇（{', '.join(tops) if tops else '无'}）")
 
-    unknown = EXCLUDE_DIRS - {p.name for p in root.iterdir() if p.is_dir()}
+    # 哨兵①：名单里每一项，得能在【整棵目录树】里找到同名目录
+    # 原来只查第一层（root.iterdir()）—— 2026-10-26 重构把 04-变更卡 挪到了第二层，
+    # 旧写法会当场误报「名字写错了」。查全树才是对的判据（假红也是 bug）。
+    all_dir_names = {p.name for p in root.rglob("*") if p.is_dir()}
+    unknown = EXCLUDE_DIRS - all_dir_names
     if unknown:
-        print(f"   ⚠️ 排除名单里的 {sorted(unknown)} 在语料根目录下不存在 —— 名字可能写错了")
+        print(f"   ⚠️ 排除名单里的 {sorted(unknown)} 在整棵目录树里都找不到 —— 名字可能写错了")
 
     if EXCLUDE_DIRS and not dropped:
         print("   ⚠️ 排除名单非空、却一篇都没排掉 —— 过滤失效")
