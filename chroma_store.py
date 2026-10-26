@@ -64,7 +64,17 @@ def build_index(all_positions, vectors, path=DB_PATH, collection_name=COLLECTION
 
     db_path = Path(str(path))
     if db_path.exists():
-        shutil.rmtree(db_path)
+        try:
+            shutil.rmtree(db_path)
+        except PermissionError as e:
+            # Windows 特有：库文件被占用时 rmtree 只会抛 WinError 32，看不出是谁占的
+            # 最常见占用者 = 正在跑的 FAST_API.py / uvicorn（它 PersistentClient 一直开着 sqlite）
+            raise RuntimeError(
+                f"删不掉旧库：{db_path}\n"
+                f"原因：有进程正占用库文件（最常见的是还在跑的 FAST_API.py / uvicorn）。\n"
+                f"修法：先停掉服务（PyCharm 里点红色方块，或关掉那个终端窗口），再重跑本脚本。\n"
+                f"原始错误：{e}"
+            ) from e
 
     _COLLECTION_CACHE.clear()  # 库被删了，缓存里的句柄也失效了
 
