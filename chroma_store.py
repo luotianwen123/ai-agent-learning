@@ -29,6 +29,12 @@ import chromadb
 DB_PATH = Path(os.environ.get("CHROMA_DB_PATH", str(Path.home() / "chroma_notes_db")))
 COLLECTION = "notes"
 
+# 分块参数：建库（chroma_build.py）与启动对账（FAST_API.py）必须用【同一组数】，
+# 否则「块数 vs 库里条数」永远对不上，会天天误报。
+# 放这里 = 单一真源；别在两个文件里各写一份（改一处忘一处就是这类 bug 的来源）。
+MAX_CHUNK_SIZE = 150
+OVERLAP = 30
+
 # 复用一个 client，别每次查询都新开一遍
 # 每次 PersistentClient() 都要重新打开 sqlite + 加载索引，单次 50–200ms，
 # 放进 FastAPI 就是每个请求白付一次。缓存之后只付第一次。

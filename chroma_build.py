@@ -16,10 +16,8 @@ from sentence_transformers import SentenceTransformer
 
 from notes_loader import load_docs
 from basic_rag_pipeline import build_corpus
-from chroma_store import build_index
-
-MAX_CHUNK_SIZE = 150
-OVERLAP = 30
+# 分块参数从 chroma_store 取（单一真源）—— FAST_API 的启动对账用的是同一组数
+from chroma_store import build_index, MAX_CHUNK_SIZE, OVERLAP
 
 model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
 
