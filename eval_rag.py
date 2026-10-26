@@ -1,43 +1,18 @@
 # -*- coding: utf-8 -*-
+"""RAG 检索测评线（EVAL_SET → Chroma 检索 → 指标 → 存档对比）。
+
+四层结构：
+  ① 数据层 EVAL_SET     题 + gold（文件 + 答案里必含的逐字片段）
+  ② 检索层 make_searcher 给 query 返回按相似度排好的块（换实现只改这里）
+  ③ 指标层 _match_chunk / compute_metrics
+  ④ 报告层 print_table / save_run / compare_last_run
 """
-eval_rag.py —— RAG 检索的「测评线」
-
-════════════════════════════════════════════════════════════════════
-这份文件的目的（先读这段，再看代码）
-────────────────────────────────────────────────────────────────────
-它只回答一个问题：
-    我改了检索之后，到底变好了还是变坏了？用数字说。
-
-所以它必须满足三条，缺一条就没意义：
-  1. 题目固定      —— 每次跑同一套题，否则数字不可比
-  2. 判定是机器做的 —— 人手判 = 会骗自己
-  3. 结果能存档对比 —— 存成 JSON，下次跑完跟上次比
-
-════════════════════════════════════════════════════════════════════
-四层结构（改代码前先想清楚自己在改哪一层）
-────────────────────────────────────────────────────────────────────
-  ① 数据层  EVAL_SET          ：题 + gold（文件 + 该答案里必含的关键词）
-  ② 检索层  make_searcher()   ：只负责"给 query，返回按相似度排好的块"
-  ③ 指标层  _match_chunk / compute_metrics ：只负责算数，不打印
-  ④ 报告层  print_table / save_run / compare_last_run ：输出 + 存档 + 跟上次比
-
-层与层之间只传数据、不互相 print。这样以后把 Chroma 换成 Reranker，
-只动 ②，其余三层一行都不用改。
-
-════════════════════════════════════════════════════════════════════
-【你要自己填的 3 处】——都已标成 TODO，搜 "TODO" 就能找到
-────────────────────────────────────────────────────────────────────
-  TODO ①  每道题的 must_contain 关键词     ← 必须你填，只有你知道答案在哪句话
-  TODO ②  _match_chunk 的判定逻辑         ← 先照着跑通，然后用自己的话重写
-  TODO ③  compare_last_run 的"变好/变坏"   ← 自己定义什么叫变好
-"""
-
 import json
 import os
 from datetime import datetime
 from pathlib import Path
 
-# 必须在 sentence_transformers 之前 —— 否则它会去 huggingface.co 查更新，国内直连超时
+# 必须在 sentence_transformers 之前
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
@@ -46,126 +21,95 @@ from sentence_transformers import SentenceTransformer
 from notes_loader import load_docs
 from chroma_store import search_as_chunks, _get_collection, DB_PATH, COLLECTION
 
-# ────────────────────────────────────────────────────────────────
-# ① 数据层
-# ────────────────────────────────────────────────────────────────
-# K_RETRIEVE：先从库里捞多少条回来（捞 10 条，才能算出"排第几"）
-# K_REPORT  ：对外报的 Recall@K / Hit@K（面试说"Recall@5"才标准）
-K_RETRIEVE = 10
-K_REPORT = 5
+K_RETRIEVE = 10   # 先捞 10 条，才能算出排第几
+K_REPORT = 5      # 对外报 Recall@5 / Hit@5
+RUNS_DIR = Path(__file__).with_name("eval_runs")
 
-RUNS_DIR = Path(__file__).with_name("eval_runs")   # 每次运行存一份 JSON
-
-# 每道题：q = 问题；gold = 一组"正确答案在哪里"的候选
-#   file          ：哪个文件
-#   must_contain  ：那句话里必然出现的一个关键词（空字符串 = 退化成"只看文件"）
-#
-# ⭐ TODO ①（最重要，必须你填）
-#   为什么必须加 must_contain：
-#     只判文件名的话，"召回了正确文件、但那块只是 frontmatter / 标题行"
-#     也会被算成命中 —— 这就是你之前看到的"90% 全绿但检索是垃圾"。
-#   怎么填：
-#     打开那篇笔记，找到真正回答这句话的那一句，挑一个【只在这句/这一节出现】的词。
-#     别挑 "RAG" "Agent" 这种全文到处都是的词（等于没加约束）。
-#     填完跑一次：如果 hit 从 9/10 掉到 6/10 —— 那不是退步，是终于测出真相。
+# must_contain 必须是【从笔记里逐字复制】的片段；手打/总结出来的词必然 0 次命中。
+# 同一题允许多个 (文件, 关键词) 组合，命中任一即算对。
 EVAL_SET = [
-    {"id": "Q1", "q": "什么是RAG？", "gold": [
-        {"file": "RAG六步链路·全局地图.md", "must_contain": ""},
-        {"file": "RAG系统课·第1讲.md", "must_contain": ""},
-        {"file": "Agent术语中英对照表.md", "must_contain": ""},
+    {"id": "Q1", "q": "RAG 和微调该怎么选？", "gold": [
+        {"file": "RAG系统课·第1讲.md", "must_contain": "行为风格"},
     ]},
     {"id": "Q2", "q": "为什么说切分是RAG的命门？", "gold": [
-        {"file": "RAG系统课·第1讲.md", "must_contain": ""},
+        {"file": "RAG系统课·第1讲.md", "must_contain": "整篇塞进去"},
     ]},
     {"id": "Q3", "q": "为什么余弦相似度必须除以范数？", "gold": [
-        {"file": "RAG后四环·向量化·检索·组装·生成.md", "must_contain": ""},
+        {"file": "RAG后四环·向量化·检索·组装·生成.md", "must_contain": "只看方向"},
     ]},
     {"id": "Q4", "q": "为什么overlap不能设得很大？", "gold": [
-        {"file": "RAG系统课·第1讲.md", "must_contain": ""},
+        {"file": "RAG系统课·第1讲.md", "must_contain": "不能设得很大"},
     ]},
     {"id": "Q5", "q": "分块器有几道校验？分别是什么？", "gold": [
-        {"file": "分块位置与可溯源.md", "must_contain": ""},
-        {"file": "分块与往返校验的实现.md", "must_contain": ""},
-        {"file": "项目README.md", "must_contain": ""},
+        {"file": "项目README.md", "must_contain": "分块长度合规"},
+        {"file": "项目README.md", "must_contain": "重叠长度一致性校验"},
+        {"file": "分块位置与可溯源.md", "must_contain": "重叠一致性"},
+        {"file": "分块与往返校验的实现.md", "must_contain": "分块长度合规"},
     ]},
     {"id": "Q6", "q": "语料加载层有几道哨兵？分别防什么？", "gold": [
-        {"file": "元数据过滤与哨兵.md", "must_contain": ""},
-        {"file": "上下文检索·让块带着出处进向量.md", "must_contain": ""},
+        {"file": "元数据过滤与哨兵.md", "must_contain": "名单里的目录"},
+        {"file": "上下文检索·让块带着出处进向量.md", "must_contain": "EXCLUDE_DIRS"},
     ]},
     {"id": "Q7", "q": "prev[-0:]为什么会出错？", "gold": [
-        {"file": "RAG六步链路·全局地图.md", "must_contain": ""},
-        {"file": "RAG系统课·第1讲.md", "must_contain": ""},
+        {"file": "RAG六步链路·全局地图.md", "must_contain": "整个前一块"},
     ]},
     {"id": "Q8", "q": "删掉Observation那条tool消息，为什么第一反应是API报错？", "gold": [
-        {"file": "tool消息的契约.md", "must_contain": ""},
-        {"file": "ReAct循环.md", "must_contain": ""},
+        {"file": "tool消息的契约.md", "must_contain": "配对缺失"},
+        {"file": "ReAct循环搬进图-while的两半.md", "must_contain": "未执行"},
+        {"file": "Agent记忆与终止·面试话术.md", "must_contain": "tool_call_id"},
     ]},
     {"id": "Q9", "q": "done字段为什么要用not？它怎么控制循环？", "gold": [
-        {"file": "ReAct循环.md", "must_contain": ""},
+        {"file": "列表与元组.md", "must_contain": "not reply.get"},
+        {"file": "ReAct循环.md", "must_contain": "done = not"},
+        {"file": "九月总复习体检卷.md", "must_contain": "done"},
     ]},
     {"id": "Q10", "q": "checkpointer存的是最新一张快照还是全部？", "gold": [
-        {"file": "checkpointer的两层存储.md", "must_contain": ""},
-        {"file": "checkpointer记忆持久化.md", "must_contain": ""},
+        {"file": "checkpointer的两层存储.md", "must_contain": "全部留存"},
+        {"file": "checkpointer记忆持久化.md", "must_contain": "每一步之后"},
     ]},
 ]
 
 
 def check_gold_alive(docs):
-    """gold 里的文件必须在当前语料里 —— 否则这题永远 FAIL，而你查不出原因。
-
-    为什么要有这一步：笔记会改名、会搬家、会删。gold 写的是旧名字时，
-    指标只会默默变差，看起来像"检索坏了"，其实是【考卷过期了】。
-    这类"看起来像 A 其实是 B"的问题，必须在开跑前就喊出来。
-    """
+    """gold 里的文件必须在当前语料里，否则该题永远 FAIL 且看不出原因（考卷过期）。"""
     alive = {Path(d["path"]).name for d in docs}
     dead = [(c["id"], g["file"]) for c in EVAL_SET for g in c["gold"] if g["file"] not in alive]
     if dead:
         print("⚠️【考卷过期】下面这些 gold 文件已不在语料里：")
         for qid, f in dead:
             print(f"   {qid}  {f}")
-        print("   → 这题会永远 FAIL，先去改 gold，或把文件找回来")
     return dead
 
 
-# ────────────────────────────────────────────────────────────────
-# ③ 指标层（先定义"怎么判"，再跑；顺序别反）
-# ────────────────────────────────────────────────────────────────
 def _match_chunk(chunk, gold_list):
-    """判断"这一块"是不是某个候选答案。
+    """块级判定：文件名对 + 正文含 must_contain（两层，缺一层就会假绿）。"""
+    chunk_filename = Path(chunk.pos.source).name
+    chunk_content = chunk.pos.text.strip()
 
-    规则（两层，缺一层就会误判）：
-      1. 文件名要对该 —— 只判文件名 = 假绿
-      2. 正文含 must_contain（若填了）—— 这一步才真正排除 frontmatter / 标题行
+    for gold_item in gold_list:
+        if chunk_filename != gold_item["file"]:
+            continue
+        keyword = gold_item.get("must_contain", "").strip()
+        if not keyword:
+            return True
+        if keyword in chunk_content:
+            return True
 
-    TODO ②（先跑通，然后用自己的话重写这一段）
-      写之前先回答自己：两块来自同一个文件，一块能答、一块只是标题行，
-      这里靠什么把它们区分开？如果你答不上来，说明这段你还没读懂。
-    """
-    fname = Path(chunk.pos.source).name
-    body = chunk.pos.text
-    for g in gold_list:
-        if fname != g["file"]:
-            continue
-        kw = g.get("must_contain", "")
-        if kw and kw not in body:
-            continue
-        return True
     return False
 
 
 def _doc_hit(chunk, gold_list):
-    """只看文件名 —— 保留这个指标，是为了跟历史数字对比（旧口径）。"""
+    """只看文件名 —— 保留这个指标用于跟历史数字对比。"""
     fname = Path(chunk.pos.source).name
     return any(fname == g["file"] for g in gold_list)
 
 
 def compute_metrics(rows):
-    """只算数、不打印。以后要出别的报表，直接复用这个函数。"""
     n = len(rows)
     doc_hit5 = sum(1 for r in rows if r["doc_hit@5"])
     hit5 = sum(1 for r in rows if r["hit@5"])
     ranks = [r["rank"] for r in rows if r["rank"]]
-    mrr = sum(1.0 / r["rank"] for r in rows if r["rank"]) / n if n else 0.0
+    mrr = sum(1.0 / x for x in ranks) / n if n else 0.0
     return {
         "doc_recall@5": round(doc_hit5 / n, 3) if n else 0,
         "chunk_hit@5": round(hit5 / n, 3) if n else 0,
@@ -174,16 +118,8 @@ def compute_metrics(rows):
     }
 
 
-# ────────────────────────────────────────────────────────────────
-# ② 检索层：换实现只改这一个函数
-# ────────────────────────────────────────────────────────────────
 def make_searcher():
-    """返回 search(query, top_k) -> list[ChunkItem]（已按相似度排好序）。
-
-    为什么用 Chroma（而不是内存暴力余弦）：
-      服务（FAST_API）用的是 Chroma。**测评必须测线上那一套**，
-      否则你测的是一个已经没人用的实现 —— 数字再好看也没意义。
-    """
+    """测线上同一套检索实现（Chroma），换实现只改这个函数。"""
     model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
 
     def search(query, top_k):
@@ -192,9 +128,6 @@ def make_searcher():
     return search
 
 
-# ────────────────────────────────────────────────────────────────
-# ④ 报告层
-# ────────────────────────────────────────────────────────────────
 def print_table(rows):
     print()
     print(f"{'题':<5}{'rank':<8}{'doc@5':<8}{'hit@5':<8}")
@@ -213,14 +146,10 @@ def save_run(payload):
 
 
 def compare_last_run(payload):
-    """跟上一次运行对比 —— 这是整条测评线最值钱的一段。
-
-    没有它，你只能说"现在是 9/10"；
-    有了它，你能说"从 8/10 变成 9/10，是这次改动带来的"。
-    """
+    """与上一次运行对比，并给出整体结论（有效 / 正向 / 无影响 / 负向）。"""
     files = sorted(RUNS_DIR.glob("*.json"))
     if len(files) < 2:
-        print("\n【对比】还没有上一次记录（这是第一次跑），下次再对比")
+        print("\n【对比】还没有上一次记录（这是第一次跑）")
         return
     prev = json.loads(files[-2].read_text(encoding="utf-8"))
     print(f"\n【对比】上一次 = {files[-2].name}")
@@ -229,52 +158,58 @@ def compare_last_run(payload):
         arrow = "↑" if v > old else ("↓" if v < old else "=")
         print(f"   {k:<14} {old} → {v}  {arrow}")
 
-    # TODO ③（自己定义"变好/变坏"，然后把它写清楚）
-    #   提示：一次改动几乎不会让所有题一起变好。
-    #   更有信息量的是「哪些题从 ✗ 变 ✓、哪些从 ✓ 变 ✗」。
-    #   想清楚：指标涨了、但某道原本对的题变错了 —— 这次改动算成功吗？
     old_hits = {r["id"]: r["hit@5"] for r in prev.get("每题", [])}
     better = [r["id"] for r in payload["每题"] if r["hit@5"] and not old_hits.get(r["id"], False)]
     worse = [r["id"] for r in payload["每题"] if (not r["hit@5"]) and old_hits.get(r["id"], False)]
     print(f"   变好的题：{better or '（无）'}")
     print(f"   变坏的题：{worse or '（无）'}")
 
+    curr_hit = payload["指标"]["chunk_hit@5"]
+    prev_hit = prev["指标"].get("chunk_hit@5", 0)
+
+    if curr_hit > prev_hit and len(worse) == 0:
+        conclusion = "✅ 本次改动有效：核心命中率提升，无题目退化"
+    elif curr_hit >= prev_hit and len(better) > len(worse):
+        conclusion = "⚠️ 本次改动整体正向：收益大于损失，关注退化题目"
+    elif curr_hit == prev_hit and len(better) == 0 and len(worse) == 0:
+        conclusion = "➖ 本次改动无影响：指标与题目均无变化"
+    elif curr_hit < prev_hit or len(worse) > len(better):
+        conclusion = "❌ 本次改动负向：核心指标下降或退化题目更多，建议回滚"
+    else:
+        conclusion = "➖ 本次改动影响不明确"
+
+    print(f"\n   【整体结论】{conclusion}")
+
 
 def main():
     t0 = datetime.now()
 
-    # ── 数据层：先看考卷有没有过期 ──
     docs, errors, bom = load_docs()
     print(f"【语料】入选 {len(docs)} 篇  读取失败 {len(errors)} 篇  BOM {bom}")
     check_gold_alive(docs)
 
-    # 向量库：直接用建好的库（不重新分块、不重新 encode）
     col = _get_collection(DB_PATH, COLLECTION)
     n_chunks = col.count()
     print(f"【向量库】{n_chunks} 条  ← {DB_PATH}")
 
     search = make_searcher()
 
-    # ── 主循环：平的一层，不嵌套 ──
     rows = []
     for case in EVAL_SET:
-        hits = search(case["q"], K_RETRIEVE)          # 一次检索，捞 10 条
-
+        hits = search(case["q"], K_RETRIEVE)
         rank = None
-        for i, ch in enumerate(hits, 1):               # 找"第几块能答"
+        for i, ch in enumerate(hits, 1):
             if _match_chunk(ch, case["gold"]):
                 rank = i
                 break
-
         rows.append({
             "id": case["id"],
             "q": case["q"],
-            "rank": rank,                                          # 未命中 = None
+            "rank": rank,
             "doc_hit@5": any(_doc_hit(c, case["gold"]) for c in hits[:K_REPORT]),
             "hit@5": any(_match_chunk(c, case["gold"]) for c in hits[:K_REPORT]),
         })
 
-    # ── 汇总 + 存档 + 对比 ──
     m = compute_metrics(rows)
     payload = {
         "时间": t0.strftime("%Y-%m-%d %H:%M:%S"),
