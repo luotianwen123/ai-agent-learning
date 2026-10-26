@@ -10,8 +10,9 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import time
 
 _T0 = time.perf_counter()  # 量启动耗时，从这一行开始算
+_BOOT_AT = time.time()     # 量"服务已经活了多久"（/health 用），和上面那个不是同一个东西
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pathlib import Path
 import tiktoken
 from sentence_transformers import SentenceTransformer
@@ -83,13 +84,76 @@ if _A != _INDEX_SIZE:
 else:
     print(f"【启动自检 ✅】分块 {_A} 块 = 库里 {_INDEX_SIZE} 条 —— 库与语料一致")
 
-print(f"【启动耗时】{time.perf_counter() - _T0:.2f} 秒")
+_BOOT_SEC = round(time.perf_counter() - _T0, 2)
+print(f"【启动耗时】{_BOOT_SEC} 秒")
+
+
+# ========== 运维三件套：让服务"出问题能查" ==========
+# 加这三样的原因：
+#   改动前 —— 服务答错了，你只能去翻启动时那一屏日志，翻不到就只剩"感觉不对"。
+#   改动后 —— 任何人在任何机器上 curl 一下 /health，就能看见库对不对得上。
+#   这也是「工程级」和「能跑」的分水岭：接手的人不用读你代码就知道服务健不健康。
+
+@app.get("/")
+def root():
+    """不裸 404：告诉调用方这服务是什么、有哪些接口。"""
+    return {
+        "service": "notes-rag",
+        "desc": "把本地 Obsidian 笔记库做成可问答的 RAG 服务",
+        "endpoints": {
+            "GET /": "本页（接口清单）",
+            "GET /health": "健康检查：库与语料是否对得上",
+            "POST /ask?q=你的问题": "问答，返回 answer + sources",
+        },
+    }
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """浏览器每个页面都会自动请求这个。不处理就是一条 404 噪音，会把真错误刷走。"""
+    return Response(status_code=204)
+
+
+@app.get("/health")
+def health():
+    """探针接口。判据：status == "ok" 才算健康，degraded 表示库和语料对不上。
+
+    为什么把「对账结果」也吐出来：
+      只看 HTTP 200 是不够的 —— 库过期时服务照样 200、照样答，只是答的是旧数据。
+      把 corpus.chunks 和 index.chunks 并排放出来，一眼就能看出差额。
+    """
+    consistent = _A == _INDEX_SIZE
+    return {
+        "status": "ok" if consistent else "degraded",
+        "corpus": {
+            "docs": len(docs),
+            "chunks": _A,
+            "chunk_failures": _FAILS,
+        },
+        "index": {
+            "chunks": _INDEX_SIZE,
+            "path": str(DB_PATH),
+            "collection": COLLECTION,
+        },
+        "chunking": {
+            "max_chunk_size": MAX_CHUNK_SIZE,
+            "overlap": OVERLAP,
+        },
+        "boot_sec": _BOOT_SEC,
+        "uptime_sec": round(time.time() - _BOOT_AT, 1),
+        # 不一致时直接把修法写进来，省得下次还得回想
+        "hint": "" if consistent else f"差额 {_A - _INDEX_SIZE:+d} 条：先跑 python chroma_build.py 再重启",
+    }
+
 
 
 @app.post("/ask")
 def ask(q: str):
+    _t = time.perf_counter()   # 给每个请求埋一条日志：线上慢的时候才知道慢在哪一段
+
     # 检索：改成从磁盘上的 Chroma 查（返回的仍是 list[ChunkItem]，下游不用改）
     hit_chunks = search_as_chunks(q, embedding_model, top_k=5)
+    _t_retrieve = time.perf_counter()
 
     # 出处信息
     sources = [
@@ -128,6 +192,17 @@ def ask(q: str):
         prompt_text=prompt,
         base_url=BASE_URL
     )
+
+    # 一行日志 = 一次请求的可追溯记录。
+    # 格式固定、字段固定，别随手改 —— 以后要 grep "检索慢" 就是靠这个前缀。
+    # 检索段(ms) 和 生成段(ms) 分开记：慢在检索还是慢在模型，一眼分得清。
+    _now = time.perf_counter()
+    print(
+        f"【/ask】q={q[:30]!r} | 块 {len(hit_chunks)} | 上下文 {len(safe_context)} 段 | "
+        f"检索 {( _t_retrieve - _t) * 1000:.0f}ms | 生成 {(_now - _t_retrieve) * 1000:.0f}ms | "
+        f"共 {(_now - _t) * 1000:.0f}ms"
+    )
+
     return {"answer": answer, "sources": sources}
 
 
