@@ -13,3 +13,5 @@ checkpoints.sqlite*
 chroma_notes_db/
 chroma_demo_db/
 chroma.sqlite3
+
+eval_runs/
