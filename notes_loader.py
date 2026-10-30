@@ -9,11 +9,44 @@
 单篇读取失败不再拖垮整体：跳过 + 记录 + 报告（环境级错误仍然立刻失败）
 BOM 从"默默吃掉"变成"吃掉 + 计数可见"
 """
+import os
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
 
-# 语料根目录：写【绝对路径】—— 相对路径的基准是"运行时的工作目录"，换个目录启动就会指向别处
-ROOT = Path(r"C:\Users\luotianwen\ai-agent-notes")
+# .env 里可能写着 NOTES_ROOT ⇒ 必须在解析 ROOT 之前读进来。
+# 显式给路径：load_dotenv() 的基准是"运行时工作目录"，换个目录启动就读不到。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_HERE / ".env")
+except ImportError:      # 没装 python-dotenv 时退化为纯环境变量，不阻断
+    pass
+
+
+# ── 语料根目录：三级优先 ─────────────────────────────────────────
+# ① 环境变量 NOTES_ROOT   —— 最显性，写在 .env 里
+# ② ~/ai-agent-notes      —— 作者本机的笔记库位置
+# ③ 仓库自带 sample_notes/ —— 别人 clone 下来、没有自己笔记库时用它
+#
+# 🔴 2026-10-30 为什么改成这样：原来是把作者本人的笔记库绝对路径**写死在源码里**。
+#    别人的机器上这个路径必然不存在 ⇒ load_docs 里 SystemExit ⇒ 「clone 下来跑不了」。
+#    而当天的"干净 clone 验收"是在作者本机跑的（用户名没变、那个目录真实存在）⇒ 全绿。
+#    **这是典型的假绿**：验收「别人能不能跑」，必须把本机特征（家目录 / 用户名 / 既有笔记库）
+#    全部换掉，否则测的是自己。
+_HOME_VAULT = Path.home() / "ai-agent-notes"
+_SAMPLE_VAULT = _HERE / "sample_notes"
+
+
+def _resolve_root() -> Path:
+    env = os.environ.get("NOTES_ROOT", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    if _HOME_VAULT.is_dir():
+        return _HOME_VAULT
+    return _SAMPLE_VAULT
+
+
+ROOT = _resolve_root()
 # 2026-10-26 库重构（三大章）后改名：07-求职复习 → 91-求职与面试/复习材料；98-代码变更卡 → 02-RAG项目/04-变更卡
 # ⚠️ 这两个都能命中【嵌套】目录：is_excluded 比的是全部路径分段，不只是第一层
 # 03-变更卡 是约定③之后新建的（Agent 项目的修改记录），与 04-变更卡 同性质：过程产物，不进语料
@@ -66,9 +99,18 @@ def load_docs(root: Path = ROOT) -> tuple[list[dict], list[tuple[str, str]], int
              errors    = [(路径, 原因), ...]                 跳过没读的
              bom_files = 带 BOM 的文件数（可见性计数）
     """
-    # 环境级错误：立刻失败
+    # 环境级错误：立刻失败。但错误信息必须自带修法 ——
+    # 别人 clone 下来第一眼就是这条，只说"不存在"等于把他丢在原地。
     if not root.is_dir():
-        raise SystemExit(f"语料目录不存在：{root}")
+        raise SystemExit(
+            f"语料目录不存在：{root}\n"
+            f"\n修法（二选一，写进项目根目录的 .env）：\n"
+            f"  ① 用你自己的笔记库：NOTES_ROOT=<你的笔记库绝对路径>\n"
+            f"  ② 用仓库自带示例语料：NOTES_ROOT=sample_notes\n"
+            f"\n解析顺序：环境变量 NOTES_ROOT → {_HOME_VAULT} → {_SAMPLE_VAULT}"
+        )
+
+    print(f"【语料根目录】{root}")
 
     md_files,dropped = scan_md_files(root)
 
@@ -79,16 +121,21 @@ def load_docs(root: Path = ROOT) -> tuple[list[dict], list[tuple[str, str]], int
 
     all_dir_names = {p.name for p in root.rglob("*") if p.is_dir()}
 
+    # 示例语料是「能跑起来的最小样本」，不是一份完整笔记库 ——
+    # 黑名单目录在它里面本来就不存在，硬查会得到一条假红。
+    # 🔴 假红也是 bug：一条误报会让后面所有真报警都失去信任（2026-10-26 已踩过一次）。
+    is_sample = root.resolve() == _SAMPLE_VAULT.resolve()
+
     # 哨兵①：白名单里每一项，得能在【整棵目录树】里找到同名目录
     # 名字写错 / 目录被改名 ⇒ 整章静默消失，而且篇数看起来"正常变少" —— 这是最贵的假绿
     unknown_inc = INCLUDE_TOPS - all_dir_names
-    if unknown_inc:
+    if unknown_inc and not is_sample:
         print(f"   🔴 白名单里的 {sorted(unknown_inc)} 在整棵目录树里都找不到 —— 整章会被漏掉")
 
     # 哨兵②：黑名单里每一项，得能找到同名目录（查全树，不只第一层）
     # 2026-10-26 重构把 04-变更卡 挪到了第二层，旧写法（只查 root.iterdir()）会当场误报「名字写错了」
     unknown_exc = EXCLUDE_DIRS - all_dir_names
-    if unknown_exc:
+    if unknown_exc and not is_sample:
         print(f"   ⚠️ 排除名单里的 {sorted(unknown_exc)} 在整棵目录树里都找不到 —— 名字可能写错了")
 
     # 哨兵③：白名单【外面】还有哪些顶层目录 —— 白名单失效是静默变少，必须每次都摆出来
