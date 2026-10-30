@@ -409,10 +409,23 @@ def build_corpus(docs: list[dict], max_chunk_size: int, overlap: int):
         ps = [replace(p, header=subsection_location(text, p.start), source=d["path"]) for p in ps]
         assert all(p.header for p in ps), f"{name}: 有块的 header 是空的"
 
-        all_positions.extend(ps)          # ★ 先入库 —— 后面走哪个分支都不会漏
-
+        # —— 口径分家：校验含空块，入库不含空块 ——
+        # frontmatter 用【空格占位】（见上，为了位置不前移），那串空格会被 SEPARATORS 里的
+        # " " 切出来 → 块0 常常是 120 个纯空格（= raw_chunk_max = 150-30）。
+        #   · 对 check_no_loss 来说它【必须有】：restored_parts 少了它，还原长度就短一截，误报丢失
+        #   · 对检索来说它【必须没有】：向量近乎噪声，还会白占 top_k 名额（今晚实测库里 57 个 / 2.10%）
+        # 所以校验照旧用全量，入库前再滤。
         ch = [p.text for p in ps]
         ov = [p.actual_overlap for p in ps]
+
+        kept = [p for p in ps if p.text.strip()]
+        dropped = len(ps) - len(kept)
+        if dropped:
+            print(f"【空块过滤】{name}: {len(ps)} → {len(kept)} 块（丢掉 {dropped} 个纯空白块）")
+        # index 重排：删块后原序号会断号，位置信息在 start/end 里，不受影响
+        ps = [replace(p, index=i) for i, p in enumerate(kept)]
+
+        all_positions.extend(ps)          # ★ 先入库 —— 后面走哪个分支都不会漏
 
         if len(ch) < 2:                   # 单块文档：没有相邻对可校验 → 跳过，但必须上报
             report.append((name, "跳过", "只分出 1 块，无相邻对可校验"))
@@ -425,7 +438,8 @@ def build_corpus(docs: list[dict], max_chunk_size: int, overlap: int):
         ok4, restored_len, origin_len, diff_desc = check_no_loss(ch, text, ov)
 
         if ok1 and ok2 and ok3 and ok4:
-            report.append((name, "通过", f"{len(ch)} 块 · 最长 {max_num}"))
+            cnt = f"{len(ps)} 块" if dropped == 0 else f"入库 {len(ps)} 块 / 校验 {len(ch)} 块"
+            report.append((name, "通过", f"{cnt} · 最长 {max_num}"))
             continue
 
         why = []
