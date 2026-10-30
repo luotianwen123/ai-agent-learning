@@ -164,19 +164,38 @@ def compare_last_run(payload):
     print(f"   变好的题：{better or '（无）'}")
     print(f"   变坏的题：{worse or '（无）'}")
 
+    # ── 结论判定 ──────────────────────────────────────────────
+    # 为什么不再拿 chunk_hit 当主判据：命中率已经封顶在 1.0，改动再好也涨不动。
+    # 所以改看「排序质量」：MRR（名次倒数的均值）+ avg_rank_hit（平均命中位次）。
     curr_hit = payload["指标"]["chunk_hit@5"]
     prev_hit = prev["指标"].get("chunk_hit@5", 0)
+    curr_mrr = payload["指标"]["mrr"]
+    prev_mrr = prev["指标"].get("mrr", 0)
+    curr_rank = payload["指标"]["avg_rank_hit"]
+    prev_rank = prev["指标"].get("avg_rank_hit", 0)
 
-    if curr_hit > prev_hit and len(worse) == 0:
-        conclusion = "✅ 本次改动有效：核心命中率提升，无题目退化"
-    elif curr_hit >= prev_hit and len(better) > len(worse):
-        conclusion = "⚠️ 本次改动整体正向：收益大于损失，关注退化题目"
-    elif curr_hit == prev_hit and len(better) == 0 and len(worse) == 0:
-        conclusion = "➖ 本次改动无影响：指标与题目均无变化"
-    elif curr_hit < prev_hit or len(worse) > len(better):
-        conclusion = "❌ 本次改动负向：核心指标下降或退化题目更多，建议回滚"
+    # MRR 的相对变化率；上次为 0 时避免除零
+    if prev_mrr:
+        delta = (curr_mrr - prev_mrr) / prev_mrr
     else:
-        conclusion = "➖ 本次改动影响不明确"
+        delta = 1.0 if curr_mrr > 0 else 0.0
+
+    print(f"   MRR 变化率 = {delta:+.1%}（{prev_mrr} → {curr_mrr}）· "
+          f"平均位次 {prev_rank} → {curr_rank}")
+
+    # 判定优先级：先拦负向 → 再认提升 → 再判无影响 → 剩下的交给人工
+    if len(worse) > len(better) or curr_hit < prev_hit:
+        conclusion = "❌ 本次改动负向：退化题目更多或命中率下降，建议回滚"
+    elif delta >= 0.01 and len(worse) == 0:
+        conclusion = (f"✅ 本次改动有效：MRR 提升 {delta:+.1%}，无题目退化"
+                      "（命中率已封顶，判据用的是 MRR）")
+    elif delta <= -0.01:
+        conclusion = f"❌ 本次改动负向：MRR 下降 {delta:+.1%}（即使命中率未变）"
+    elif curr_hit == prev_hit and curr_mrr == prev_mrr and curr_rank == prev_rank:
+        conclusion = "➖ 本次改动无影响：命中率 / MRR / 平均位次三者全等"
+    else:
+        conclusion = (f"⚠️ 需人工查看：MRR {delta:+.1%}，"
+                      f"变好 {len(better)} 题 / 变坏 {len(worse)} 题，未落入明确判据")
 
     print(f"\n   【整体结论】{conclusion}")
 
