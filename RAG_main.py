@@ -151,7 +151,20 @@ def rerank_chunks(query, chunks, top_n):
 
 
 def retrieve_context(query: str, model, tokenizer):
-    """返回 (safe_context, chunks)。查不到相关内容时返回 ("", [])。"""
+    """返回 (safe_context, chunks)。查不到相关内容时返回 ("", [])。
+
+    检索两段式（开关 RAG_RERANK 控制，默认关，用环境变量打开）：
+        ① 粗排：一次查 recall_k 条（开关打开 = RECALL_K 50 条，关闭 = TOP_K 5 条）
+        ② 闸门：top1 距离 > DIST_REJECT ⇒ 判定库里没有，直接返回空，模型不参与
+        ③ 过滤：逐条丢掉距离 > DIST_REJECT 的块，不让它占重排名额
+        ④ 精排（仅开关打开时）：交叉编码器给「问题 + 块」逐对打分，取前 TOP_K 条
+
+    为什么默认关：2026-11-02 实测同一份 10 题评测集，
+    开重排 MRR 0.633 → 0.537、recall@5 1.0 → 0.9。
+    根因是重排压平了结果多样性 —— 它偏好「体裁像答案」的块（问答体笔记），
+    把散在其它文件里的答案块挤走。碎片化笔记语料上，这等于删信息。
+    详见 README 变更卡 17。
+    """
     # 一次查够：闸门和粗排共用同一批结果（原来是查两次库）
     #   重排关闭时只取 TOP_K 条 —— 行为与加重排之前完全一致
     recall_k = RECALL_K if RERANK_ENABLED else TOP_K
