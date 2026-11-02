@@ -41,10 +41,31 @@ from chroma_store import (
     build_index,
     search,
     search_as_chunks,
+    rows_to_chunks,
 )
 
 EMBED_MODEL = "BAAI/bge-small-zh-v1.5"
-TOP_K = 5
+
+# ---- 检索两段式：粗排 RECALL_K 条 → 精排（rerank）→ 取 TOP_K 条 ----
+# 为什么要粗排：向量检索只能给「像不像」，给不了「答不答得上」。
+#   一块「很像但只答一半」的文本会挤掉真正补全答案的那块，所以先多捞。
+# 参照 anything-llm（67.8k★）server/utils/vectorDbProviders/lance/index.js
+#   第 129-132 行：searchLimit = clamp(总块数 × 0.1, 10, 50)
+#   它的库普遍很小，所以取 50 上限；本项目 2978 块也顶到 50。
+#   本项目实测定档 50：2026-11-02 15:15 在 Ryzen 7 7735H 上实测
+#   5 对 0.53s / 20 对 1.28s / 50 对 3.03s（每对约 61ms）⇒ 50 条完全跑得动。
+#   ⚠️ 这只是打分耗时，不含向量检索和 LLM 生成。
+TOP_K = 5              # 精排后真正喂给模型的条数
+RECALL_K = 50          # 粗排候选数（只给 reranker 看，不进上下文）
+
+# 重排开关（跟 OVERLAP 一样，一个开关决定开不开）—— 默认关。
+# 2026-11-02 实测（10 题评测集）：MRR 0.633 → 0.537，recall@5 1.0 → 0.9，2 好 4 坏。
+#   根因：重排把多个名额给了同一篇笔记（体裁像答案的「面试问答」），
+#   挤掉了散在其他文件里的答案块 —— 碎片化笔记语料上，重排会压平结果多样性。
+# 想开：终端先 $env:RAG_RERANK="1" 再跑，不用改代码。
+RERANK_ENABLED = os.environ.get("RAG_RERANK", "0") == "1"
+RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+
 MODEL_MAX_WINDOW = 8192
 RESERVE_OUTPUT_TOKENS = 512
 TOKENIZER_NAME = "cl100k_base"
@@ -95,17 +116,74 @@ def ensure_index(model) -> None:
     assert col.count() == len(all_positions), "块数和库内条数不一致，建库不完整"
 
 
+_RERANKER = None
+
+
+def get_reranker():
+    """懒加载重排模型：第一次真正用到才加载，不拖慢启动。"""
+    global _RERANKER
+    if _RERANKER is None:
+        from sentence_transformers import CrossEncoder
+
+        print(f"【模型】加载重排模型 {RERANK_MODEL} …（首次会下载，约 2.3G）")
+        _RERANKER = CrossEncoder(RERANK_MODEL)
+    return _RERANKER
+
+
+def rerank_chunks(query, chunks, top_n):
+    """用交叉编码器给「问题 + 块」逐对打分，返回分数最高的 top_n 条。
+
+    和向量检索的区别：
+      向量检索 = 双塔（bi-encoder，两座塔各编各的），问题和块分开编码，谁也没见过谁；
+      重排     = 交叉（cross-encoder，把两者拼成一条一起过模型）。
+    所以它能判「这块答不答得上」，而不只是「这块像不像」。
+    """
+    if len(chunks) <= 1:
+        return chunks[:top_n]
+
+    reranker = get_reranker()
+    pairs = [(query, c.pos.text) for c in chunks]
+    scores = reranker.predict(pairs)
+
+    # 按分数从高到低排；sorted 是稳定排序，分数相同则保持原顺序
+    order = sorted(range(len(chunks)), key=lambda i: -float(scores[i]))
+    return [chunks[i] for i in order[:top_n]]
+
+
 def retrieve_context(query: str, model, tokenizer):
     """返回 (safe_context, chunks)。查不到相关内容时返回 ("", [])。"""
-    # 先看 top1 距离：太远说明库里没有，硬塞给模型只会让它编
-    raw = search(query, model, top_k=1)
-    top1 = raw[0][0] if raw else 2.0
+    # 一次查够：闸门和粗排共用同一批结果（原来是查两次库）
+    #   重排关闭时只取 TOP_K 条 —— 行为与加重排之前完全一致
+    recall_k = RECALL_K if RERANK_ENABLED else TOP_K
+    raw = search(query, model, top_k=recall_k)
+    if not raw:
+        return "", []
 
+    top1 = raw[0][0]
+
+    # 闸门：top1 太远说明库里没有，硬塞给模型只会让它编
     if top1 > DIST_REJECT:
         print(f"【检索】top1 {top1:.4f} > 拒答线 {DIST_REJECT}，按「知识库中没有」处理")
         return "", []
 
-    chunks = search_as_chunks(query, model, top_k=TOP_K)
+    # 逐条过滤：超过拒答线的块先丢掉，别让它占掉重排的名额
+    #   参照 anything-llm 第 139 行注释：
+    #   "Drop pinned and below-threshold chunks first so they cannot take the reranker's topK slots."
+    kept = [row for row in raw if row[0] <= DIST_REJECT]
+    dropped = len(raw) - len(kept)
+    if not kept:
+        print(f"【检索】{len(raw)} 条候选全部超过拒答线，按「知识库中没有」处理")
+        return "", []
+
+    pool = rows_to_chunks(kept)
+
+    # 精排：粗排 RECALL_K 条 → 重排 → 只留 TOP_K 条
+    if RERANK_ENABLED and len(pool) > TOP_K:
+        chunks = rerank_chunks(query, pool, TOP_K)
+        print(f"【检索】粗排 {len(raw)} 条 → 过滤掉 {dropped} 条 → 重排 → 留 {len(chunks)} 条")
+    else:
+        chunks = pool[:TOP_K]
+        print(f"【检索】粗排 {len(raw)} 条 → 过滤掉 {dropped} 条 → 未重排，直接留 {len(chunks)} 条")
 
     if top1 > DIST_STRONG:
         print(f"【检索】top1 {top1:.4f} 在灰色区（{DIST_STRONG}~{DIST_REJECT}），答案可能不完整")

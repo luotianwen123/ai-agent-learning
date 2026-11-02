@@ -119,11 +119,24 @@ def compute_metrics(rows):
 
 
 def make_searcher():
-    """测线上同一套检索实现（Chroma），换实现只改这个函数。"""
-    model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+    """测线上同一套检索实现：粗排 RECALL_K → 阈值过滤 → 重排 → TOP_K。
+
+    2026-11-02 改：原来这里是 search_as_chunks(query, top_k)，纯向量取 top_k 条。
+    线上 RAG_main 当天已经改成「粗排 50 → 重排 → 5」，两条路不一样，
+    评测等于在测一个线上根本不存在的系统 —— 指标当然一动不动。
+    现在统一走 RAG_main.retrieve_context，只改这一个函数就能对齐。
+    """
+    import tiktoken
+
+    import RAG_main as R
+
+    model = SentenceTransformer(R.EMBED_MODEL)
+    tokenizer = tiktoken.get_encoding(R.TOKENIZER_NAME)
 
     def search(query, top_k):
-        return search_as_chunks(query, model, top_k=top_k)
+        # top_k 保留形参只为兼容调用方；实际条数由 RAG_main.TOP_K 决定
+        _safe_context, chunks = R.retrieve_context(query, model, tokenizer)
+        return chunks
 
     return search
 

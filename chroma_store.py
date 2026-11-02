@@ -123,10 +123,18 @@ def search_as_chunks(query, model, top_k=5, path=DB_PATH, collection_name=COLLEC
       就要在 /ask 里改四五处取值逻辑，出错面更大。
       包一层适配器，做到"接口不变、实现替换" —— 这是改造老项目的标准手法。
     """
+    hits = search(query, model, top_k=top_k, path=path, collection_name=collection_name)
+    return rows_to_chunks(hits)
+
+
+def rows_to_chunks(hits):
+    """把 search() 的原始结果 [(距离, 文本, 元数据)] 包成 ChunkItem 列表。
+
+    单独抽出来的原因：加了重排之后，调用方要先按阈值过滤原始结果、再包装。
+    如果这段包装只藏在 search_as_chunks 里，就得原样复制一遍。
+    """
     # 函数内 import，避免 chroma_store 在顶层依赖 basic_rag_pipeline 造成循环引用
     from basic_rag_pipeline import ChunkItem, ChunkPosition
-
-    hits = search(query, model, top_k=top_k, path=path, collection_name=collection_name)
 
     return [
         ChunkItem(
