@@ -14,4 +14,7 @@ chroma_notes_db/
 chroma_demo_db/
 chroma.sqlite3
 
-eval_runs/
+# 评测结果必须进版本库：不可重建，同一配置换语料就是不同数字；且它是简历/面试的证据
+# 只挡同目录下的其它临时产物，json 一律放行
+eval_runs/*
+!eval_runs/*.json
