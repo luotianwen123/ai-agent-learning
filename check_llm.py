@@ -1,81 +1,77 @@
-"""check_llm.py —— 存档：验证 DeepSeek 会不会返回 tool_calls
+"""check_llm.py —— 初始验证存档：确认模型能返回结构化 tool_calls
 
-【角色】
-不属于主链路。它是项目第一天的一块地基证据 ——
-证明在动手写任何循环之前，先确认了模型能吐出结构化的工具调用。
-面试时能说：「我第一步先验证了 tool_calls 的原始格式，而不是先堆框架。」
+【状态】
+DEPRECATED。保留为项目起点的验证记录，不参与主链路，请勿改造。
+一旦改写为调用 core/llm.py 的 ask()，其记录的「原始返回结构」即失效。
 
-⚠️ 禁止改造。它保留的是原始形态。一旦改成走 core/llm.py 的 ask()，
-   「原始格式长什么样」这个证据就没了。只读存档和活代码要分开。
-
-【工作流】
-单次调用，不循环。打印 content、tool_calls，以及 arguments 的类型。
+【用途】
+在搭建任何循环之前，先确认模型具备工具调用能力。
+只做单次请求，打印 content、tool_calls 及 arguments 的类型。
 
 【数据流】
-进：一条 user 消息 + 一个 read_file 工具说明书
-出：控制台打印（content / tool_calls / name / arguments / 类型）
+进：一条 user 消息 + 一个 read_file 工具 Schema
+出：stdout（content / tool_calls / function.name / arguments / 类型）
 
-【它验证出的三条事实（2026-11-05 实测）】
-1. tool_calls 不为 None，function.name = read_file
-2. arguments 是 JSON 字符串，类型是 <class 'str'>，不是字典 ——
-   所以后面所有地方都必须 json.loads()
-3. content 是空的（模型没闲聊，直接调工具），这是正常行为，不是 bug
+【初始验证结论（2026-11-05 实测）】
+1. tool_calls 非 None，function.name 为 read_file
+2. arguments 是 JSON 字符串，类型为 str 而非 dict —— 后续所有消费方都必须 json.loads()
+3. content 为空（模型未作答而是直接发起工具调用），属正常行为
 
-【不负责】
-不做任何真实文件操作。它只证明「模型会点单」，不证明「菜真的端上来了」。
-后者是 loop.py 的活。
+【边界】
+不做真实文件操作。此处只验证「模型是否发起调用」，不验证「调用是否被执行」。
+后者由 loop.py 负责。
 """
 
+import json
+import os
 
-import os                          # 用来读环境变量
-import json                        # 用来把 JSON 字符串转成字典
-from dotenv import load_dotenv     # 把 .env 里的键值对读进环境变量
-from openai import OpenAI          # DeepSeek 兼容 OpenAI 格式，所以用它
+from dotenv import load_dotenv
+from openai import OpenAI
 
-load_dotenv()                      # 不带参数：从当前文件所在目录往上逐级找 .env
+load_dotenv()
 
 client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),     # 从环境变量取 key
-    base_url=os.getenv("OPENAI_BASE_URL"),   # https://api.deepseek.com
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL"),
 )
 
-TOOLS = [                          # 列表：可以给模型多个工具，先给 1 个
+TOOLS = [
     {
-        "type": "function",        # 工具类型是「函数」
+        "type": "function",
         "function": {
-            "name": "read_file",     # 工具名：模型靠这个名字点单
-            "description": "读取工作目录里的一个文本文件，返回内容",   # 什么时候该用它
-            "parameters": {                                   # 参数说明书（JSON Schema）
+            "name": "read_file",
+            "description": "读取工作目录里的一个文本文件，返回内容",
+            "parameters": {
                 "type": "object",
-                "properties": {                               # 有哪些参数
+                "properties": {
                     "path": {
                         "type": "string",
                         "description": "要读的文件路径，相对于工作目录",
                     }
                 },
-                "required": ["path"],                         # 必填的参数名
+                "required": ["path"],
             },
         },
     }
 ]
 
 resp = client.chat.completions.create(
-    model="deepseek-chat",         # 不能用 deepseek-reasoner，它不支持工具调用
+    model="deepseek-chat",         # deepseek-reasoner 不支持 function calling
     messages=[
         {"role": "user", "content": "请读取 a.txt 这个文件，然后告诉我里面写了什么。"}
     ],
-    tools=TOOLS,                   # 把说明书交给模型
+    tools=TOOLS,
 )
 
-msg = resp.choices[0].message      # 取第一条回复
+msg = resp.choices[0].message
 
 print("=== content ===")
-print(msg.content)                 # 模型的文字回答，可能为 None
+print(msg.content)                 # 发起工具调用时为空，属正常
 print("=== tool_calls ===")
-print(msg.tool_calls)              # 模型想调哪些工具，不调就是 None
+print(msg.tool_calls)
 
-if msg.tool_calls:                 # 非空 = 模型确实要点单
-    for tc in msg.tool_calls:      # tc = tool call（一次工具调用）
+if msg.tool_calls:
+    for tc in msg.tool_calls:
         print("id        =", tc.id)
         print("name      =", tc.function.name)
         print("arguments =", tc.function.arguments, type(tc.function.arguments))
