@@ -7,7 +7,7 @@
 2. 强制退出：轮数到达 MAX_TURNS（默认 20），防止死循环烧钱
 
 【执行顺序】
-1. 构造 messages，放一条 user 消息
+1. 把本次任务作为 user 消息追加到 messages（可由调用方传入既有会话）
 2. 进入 for turn in range(1, MAX_TURNS + 1) 循环
 3. 每轮先 ask()，把 msg 无条件塞进 messages（先塞再判断）
 4. 若 msg 无 tool_calls：打印轮数并返回 msg.content（正常出口）
@@ -15,10 +15,10 @@
 6. 循环跑满仍未 return：打印达到最大轮数（强制出口）
 
 【数据流】
-进：硬编码的提问
+进：__main__ 的 REPL 从标准输入读到的任务文本
 中转：messages 列表，只增不减，是全部上下文的唯一载体
 出：stdout
-副作用：读取磁盘
+副作用：读写磁盘（经由工具）
 
 【工具输出指纹】
 md5(工具返回值)[:12]。模型回答措辞每次不同，不可作回归判据；
@@ -27,6 +27,7 @@ md5(工具返回值)[:12]。模型回答措辞每次不同，不可作回归判�
 
 【边界】
 不含权限校验、轨迹落盘。工具实现位于 core/tools.py。
+会话状态只存在内存里，进程退出即丢；不含跨次运行的历史持久化。
 """
 
 import hashlib
@@ -39,11 +40,15 @@ load_dotenv()
 MAX_TURNS = 20                                # 强制退出上限，防止死循环烧钱
 
 
-def run_agent(task: str) -> str:
-    """多轮驱动：模型自主决定工具调用次数，直到作答或达到轮数上限。"""
-    messages = [
-        {"role": "user", "content": task}
-    ]
+def run_agent(task: str, messages: list | None = None) -> str:
+    """多轮驱动：模型自主决定工具调用次数，直到作答或达到轮数上限。
+
+    messages 由调用方传入时，本次任务追加到既有会话上 —— 模型能看见前几轮
+    问过什么、调过哪些工具。不传则本次自建，函数返回即丢弃（一次性任务）。
+    """
+    if messages is None:
+        messages = []
+    messages.append({"role": "user", "content": task})
 
     for turn in range(1, MAX_TURNS + 1):
         # ---------- 本轮调用：获取模型意图 ----------
@@ -76,4 +81,20 @@ def run_agent(task: str) -> str:
 
 
 if __name__ == "__main__":
-    run_agent("请读取 a.txt 这个文件，然后告诉我里面写了什么。")
+    # 外层 REPL：run_agent 在「模型不调工具」时返回，但那不等于任务完成 ——
+    # 模型也可能是信息不足在反问。循环本身分不清这两种，只有人能判断。
+    # 所以把「答完继续」这件事交给外层：内层跑完一次任务并交回回答，外层决定下一步。
+    #
+    # session 必须活在整个 REPL 里：它一销毁，模型就看不见上一轮说了什么，
+    # 你回答它的问题它也读不懂。
+    session = []
+    print("输入任务后回车；空行、exit 或 退出 结束。")
+    while True:
+        try:
+            task = input("\n你 > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not task or task.lower() in ("exit", "quit") or task == "退出":
+            break
+        run_agent(task, session)
