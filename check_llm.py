@@ -1,7 +1,30 @@
-# check_llm.py
-# 目的：验证 DeepSeek 会不会返回「结构化的工具调用」（tool_calls）
-# 这是整个 Agent 循环唯一的数据通路，不通就别往下写
-# 【存档】2026-11-05 第一次验证 tool_calls 格式的历史脚本，不参与主链路，禁止改造
+"""check_llm.py —— 存档：验证 DeepSeek 会不会返回 tool_calls
+
+【角色】
+不属于主链路。它是项目第一天的一块地基证据 ——
+证明在动手写任何循环之前，先确认了模型能吐出结构化的工具调用。
+面试时能说：「我第一步先验证了 tool_calls 的原始格式，而不是先堆框架。」
+
+⚠️ 禁止改造。它保留的是原始形态。一旦改成走 core/llm.py 的 ask()，
+   「原始格式长什么样」这个证据就没了。只读存档和活代码要分开。
+
+【工作流】
+单次调用，不循环。打印 content、tool_calls，以及 arguments 的类型。
+
+【数据流】
+进：一条 user 消息 + 一个 read_file 工具说明书
+出：控制台打印（content / tool_calls / name / arguments / 类型）
+
+【它验证出的三条事实（2026-11-05 实测）】
+1. tool_calls 不为 None，function.name = read_file
+2. arguments 是 JSON 字符串，类型是 <class 'str'>，不是字典 ——
+   所以后面所有地方都必须 json.loads()
+3. content 是空的（模型没闲聊，直接调工具），这是正常行为，不是 bug
+
+【不负责】
+不做任何真实文件操作。它只证明「模型会点单」，不证明「菜真的端上来了」。
+后者是 loop.py 的活。
+"""
 
 
 import os                          # 用来读环境变量
