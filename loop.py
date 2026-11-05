@@ -1,14 +1,18 @@
-"""loop.py —— 单轮 Agent 闭环
+"""loop.py —— 多轮 Agent 闭环
 
-把「一次问答」变成「一次任务」：模型给出工具调用意图，本地代码执行，
-结果回传后再由模型作答。当前只有一次往返；多轮驱动见 core/loop.py。
+把「一次往返」升级为「while 式多轮循环」：模型自己决定调几次工具、调哪些、
+什么时候停。核心只有一个新概念：终止条件，而且有两个——
+
+1. 正常退出：模型这一轮没返回 tool_calls，说明它认为信息够了，直接作答
+2. 强制退出：轮数到达 MAX_TURNS（默认 20），防止死循环烧钱
 
 【执行顺序】
 1. 构造 messages，放一条 user 消息
-2. 第一次 ask()：模型返回 tool_calls
-3. 按 name + arguments 执行本地工具
-4. 结果以 role="tool" 回填 messages，tool_call_id 与上一步一一对应
-5. 第二次 ask()：模型基于真实结果作答
+2. 进入 for turn in range(1, MAX_TURNS + 1) 循环
+3. 每轮先 ask()，把 msg 无条件塞进 messages（先塞再判断）
+4. 若 msg 无 tool_calls：打印轮数并返回 msg.content（正常出口）
+5. 否则逐个执行 tool_call，结果以 role="tool" 回填，打印调用日志
+6. 循环跑满仍未 return：打印达到最大轮数（强制出口）
 
 【数据流】
 进：硬编码的提问
@@ -22,7 +26,7 @@ md5(工具返回值)[:12]。模型回答措辞每次不同，不可作回归判�
 基线：0a8c1b0d5dfb
 
 【边界】
-不含多轮循环、权限校验、轨迹落盘。工具实现位于 core/tools.py。
+不含权限校验、轨迹落盘。工具实现位于 core/tools.py。
 """
 
 import hashlib
@@ -32,35 +36,44 @@ from core.tools import TOOLS, run_tool
 
 load_dotenv()
 
+MAX_TURNS = 20                                # 强制退出上限，防止死循环烧钱
 
-messages = [
-    {"role": "user", "content": "请读取 a.txt 这个文件，然后告诉我里面写了什么。"}
-]
 
-# ---------- 第一次调用：获取工具调用意图 ----------
+def run_agent(task: str) -> str:
+    """多轮驱动：模型自主决定工具调用次数，直到作答或达到轮数上限。"""
+    messages = [
+        {"role": "user", "content": task}
+    ]
 
-msg = ask(messages, TOOLS)
+    for turn in range(1, MAX_TURNS + 1):
+        # ---------- 本轮调用：获取模型意图 ----------
+        msg = ask(messages, TOOLS)
+        messages.append(msg)                  # 无条件先塞再判断，后续 tool 消息要对应它的 tool_call_id
 
-if not msg.tool_calls:
-    print("模型未调用工具，直接回答：", msg.content)
-    raise SystemExit(0)
+        # ---------- 正常出口：没有 tool_calls，模型认为信息够了 ----------
+        if not msg.tool_calls:
+            print(f"第 {turn} 轮：模型作答")
+            print("=== 模型最终回答 ===")
+            print(msg.content)
+            return msg.content
 
-messages.append(msg)                           # 必须回填：后续 tool 消息要对应它的 tool_call_id
+        # ---------- 执行本轮所有 tool_call，结果回填消息列表 ----------
+        for tc in msg.tool_calls:
+            result = run_tool(tc.function.name, tc.function.arguments)
+            print(f"第 {turn} 轮：调用了 {tc.function.name}")
+            print("=== 工具真实返回 ===")
+            print(result)
+            print("工具输出指纹:", hashlib.md5(result.encode("utf-8")).hexdigest()[:12])
+            messages.append({
+                "role": "tool",               # 固定为 tool，写 user 会被 API 拒绝
+                "tool_call_id": tc.id,        # 必须与上一条 tool_calls 中的 id 完全一致，否则 400
+                "content": result,            # 必须是 str；传 dict 会在序列化阶段失败
+            })
 
-# ---------- 执行工具，结果回填消息列表 ----------
-for tc in msg.tool_calls:
-    result = run_tool(tc.function.name, tc.function.arguments)
-    print("=== 工具真实返回 ===")
-    print(result)
-    print("工具输出指纹:", hashlib.md5(result.encode("utf-8")).hexdigest()[:12])
-    messages.append({
-        "role": "tool",                        # 固定为 tool，写 user 会被 API 拒绝
-        "tool_call_id": tc.id,                 # 必须与上一条 tool_calls 中的 id 完全一致，否则 400
-        "content": result,                     # 必须是 str；传 dict 会在序列化阶段失败
-    })
+    # ---------- 强制出口：循环跑满仍未 return ----------
+    print(f"达到最大轮数 {MAX_TURNS}，已停止")
+    return f"达到最大轮数 {MAX_TURNS}，已停止"
 
-# ---------- 第二次调用：模型基于真实结果作答 ----------
-resp2_msg = ask(messages, TOOLS)
 
-print("=== 模型最终回答 ===")
-print(resp2_msg.content)
+if __name__ == "__main__":
+    run_agent("请读取 a.txt 这个文件，然后告诉我里面写了什么。")
