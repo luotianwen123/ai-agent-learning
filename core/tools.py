@@ -69,7 +69,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run",
-            "description": "执行一条 shell 命令，返回它的输出",
+            # description 是模型选工具的唯一依据，模型看不到本机环境。
+            # 不写清平台，它会按 Linux 习惯写 pwd / ls / cat（11-05 实测遇到 pwd 失败）。
+            "description": (
+                "执行一条 shell 命令并返回输出，首行为该命令本身。"
+                "当前环境是 Windows，命令解释器为 cmd："
+                "列目录用 dir，读文件用 type，删除用 del，删目录用 rd /s /q；"
+                "不支持 pwd、ls、cat、rm。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -105,7 +112,12 @@ def read_file(path):
 def write_file(path, content):
     """写文件，返回一句说明。失败时返回错误字符串，不抛异常。"""
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        # newline="" 关掉换行翻译，内容按字节原样落盘。
+        # 默认的 newline=None 会在 Windows 上把每个 \n 改写成 \r\n：
+        #   ① 上报的字节数与磁盘实际不符（11-05 实测：报 74，实际 75）
+        #   ② 读进来再写出去不再恒等 —— 模型只改一行，整份文件换行符被换掉，
+        #      git diff 会显示全文重写。Agent 不得引入模型没要求的改动。
+        with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         # 上报 len(content.encode()) 而非 len(content)：
         # 中文按 UTF-8 编码为 3 字节，字节数才是实际落盘量
@@ -116,7 +128,11 @@ def write_file(path, content):
 
 
 def run(command):
-    """执行 shell 命令，返回 stdout + stderr 合并文本。失败时返回错误字符串。"""
+    """执行 shell 命令。
+
+    成功：返回 "$ <命令>" + stdout + stderr（首行为命令行回显）
+    失败：返回 "错误：命令执行失败：..." 字符串，不抛异常
+    """
     try:
         result = subprocess.run(
             command,
@@ -148,9 +164,16 @@ def run(command):
         result.stdout, result.stderr = out, err
         # 命令执行但退出码非 0 不视为异常 —— 那是命令的正常输出（stderr），
         # 模型需要读到它才能自行纠正。真正的异常只有子进程无法启动。
-        return result.stdout + result.stderr
+        #
+        # 返回值首行回显命令行本身。模型只拿得到输出，看不见自己上一轮写过什么命令；
+        # 不回显时它收到的只有「系统找不到指定的路径。」这类不含命令名的文本，
+        # 无从判断是哪条失败，只能反复重试（11-05 实测：第 5、6 轮指纹完全相同）。
+        # Aider / Claude Code 同样以 "$ " 回显命令。
+        return f"$ {command}\n{result.stdout}{result.stderr}"
     except Exception as e:
-        return f"错误：命令执行失败：{e}"
+        # 保持「错误：」开头 —— 与 read_file / write_file 的失败口径一致，
+        # 同时附上命令，否则同样无法定位是哪条命令连子进程都没起来。
+        return f"错误：命令执行失败：{e}（命令：{command}）"
 
 
 def run_tool(name, arguments_json):
