@@ -1,0 +1,20 @@
+# Python 产物
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境（依赖看 requirements.txt，不提交环境本身）
+.venv/
+venv/
+
+# 密钥：绝不进版本库
+.env
+.env.local
+
+# 回归基线临时文件（每次重构对比用，不长期保留）
+baseline.txt
+after.txt
+
+# 编辑器
+.idea/
+.vscode/
