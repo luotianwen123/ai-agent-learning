@@ -29,6 +29,7 @@ loop 中以 for tc in msg.tool_calls 遍历并回填 messages。
 import json
 import os
 import subprocess
+import tempfile
 
 
 # ============ 工具 Schema ============
@@ -236,13 +237,18 @@ if __name__ == "__main__":
     # 中文编码用例：验证 git 的 UTF-8 输出不被解坏 —— 即 run() 弃用 text=True 的直接动因。
     # 直接对当前仓库执行 git log 会依赖「当前目录恰为 git 仓库且最新提交为中文」，
     # 换目录即失效。故此处自建临时仓库并提交一条中文 message，再读回校验。
-    run("rd /s /q _test_repo" if os.name == "nt" else "rm -rf _test_repo")  # 清理上次残留
-    run("git init -q _test_repo")
-    write_file("_test_repo/a.txt", "a")
-    run("git -C _test_repo add a.txt")
+    #
+    # 🔴 仓库建在系统临时目录，不建在项目里。
+    # 原写法在 cwd 下建 _test_repo，PyCharm 一看见项目内出现 .git 就把该目录注册成 VCS 根；
+    # 自测结束时目录被删，注册记录却留着，于是每次打开项目都弹
+    # 「无效 VCS 根映射：core\_test_repo」。自测产物不该污染项目目录，这是通例。
+    _tmp_repo = tempfile.mkdtemp(prefix="mini_pi_gittest_")
+    run(f'git init -q "{_tmp_repo}"')
+    write_file(os.path.join(_tmp_repo, "a.txt"), "a")
+    run(f'git -C "{_tmp_repo}" add a.txt')
     # 显式传入 user.name / user.email：机器上可能未配置全局 git 身份，否则 commit 失败
-    run('git -C _test_repo -c user.name=test -c user.email=test@test commit -q -m "项目版图：core 层三个工具就位"')
-    print(run("git -C _test_repo log --oneline -1"))  # 期望：中文正常显示
+    run(f'git -C "{_tmp_repo}" -c user.name=test -c user.email=test@test commit -q -m "项目版图：core 层三个工具就位"')
+    print(run(f'git -C "{_tmp_repo}" log --oneline -1'))  # 期望：中文正常显示
 
     print("--- 失败路径 1：读不存在的文件 ---")
     print(read_file("no_such_file.txt"))
@@ -267,6 +273,13 @@ if __name__ == "__main__":
     else:
         print(run("cat definitely_not_a_file.txt"))
 
-    # 清理自测产物（含临时 git 仓库）
-    run(("del _test_ok.txt && rd /s /q _test_repo" if os.name == "nt"
-         else "rm -f _test_ok.txt && rm -rf _test_repo"))
+    # 清理自测产物（临时 git 仓库在系统临时目录，不在项目里）
+    #
+    # 🔴 这里不能用 shutil.rmtree(..., ignore_errors=True)：
+    # git init 会在 .git/objects 下建只读文件，Windows 上 rmtree 遇到只读文件就失败，
+    # 而 ignore_errors=True 让这次失败**完全无声** —— 目录留在 %TEMP% 里，
+    # 跑几十次自测就是几十个残留。走 shell 的 rd /s /q 会强制处理只读属性。
+    if os.path.exists("_test_ok.txt"):
+        os.remove("_test_ok.txt")
+    run(f'rd /s /q "{_tmp_repo}"' if os.name == "nt" else f'rm -rf "{_tmp_repo}"')
+    print("临时仓库已删：", not os.path.exists(_tmp_repo))

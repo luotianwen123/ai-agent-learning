@@ -32,6 +32,7 @@ md5(工具返回值)[:12]。模型回答措辞每次不同，不可作回归判�
 
 import hashlib
 from dotenv import load_dotenv
+from core import trace
 from core.llm import ask
 from core.tools import TOOLS, run_tool
 
@@ -49,6 +50,7 @@ def run_agent(task: str, messages: list | None = None) -> str:
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": task})
+    trace_path = trace.new_trace()           # 一次任务一个轨迹文件，与 messages 同生命周期
 
     for turn in range(1, MAX_TURNS + 1):
         # ---------- 本轮调用：获取模型意图 ----------
@@ -60,6 +62,7 @@ def run_agent(task: str, messages: list | None = None) -> str:
             print(f"第 {turn} 轮：模型作答")
             print("=== 模型最终回答 ===")
             print(msg.content)
+            trace.write(trace_path, type="final", turn=turn, chars=len(msg.content or ""))
             return msg.content
 
         # ---------- 执行本轮所有 tool_call，结果回填消息列表 ----------
@@ -69,6 +72,15 @@ def run_agent(task: str, messages: list | None = None) -> str:
             print("=== 工具真实返回 ===")
             print(result)
             print("工具输出指纹:", hashlib.md5(result.encode("utf-8")).hexdigest()[:12])
+            # 写轨迹放在 print 之后、append 之前：这三件事都只依赖 result，
+            # 顺序无关；但 trace 写失败不该阻断消息回填，所以它不是必经路径上的判断
+            trace.write(
+                trace_path, type="tool_call", turn=turn,
+                name=tc.function.name,
+                args=tc.function.arguments,
+                md5=hashlib.md5(result.encode("utf-8")).hexdigest()[:12],
+                len=len(result),
+            )
             messages.append({
                 "role": "tool",               # 固定为 tool，写 user 会被 API 拒绝
                 "tool_call_id": tc.id,        # 必须与上一条 tool_calls 中的 id 完全一致，否则 400
@@ -77,6 +89,7 @@ def run_agent(task: str, messages: list | None = None) -> str:
 
     # ---------- 强制出口：循环跑满仍未 return ----------
     print(f"达到最大轮数 {MAX_TURNS}，已停止")
+    trace.write(trace_path, type="max_turns", turn=MAX_TURNS)
     return f"达到最大轮数 {MAX_TURNS}，已停止"
 
 

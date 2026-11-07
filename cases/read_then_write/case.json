@@ -1,0 +1,21 @@
+{
+  "id": "read_then_write",
+  "tags": [
+    "regression",
+    "file"
+  ],
+  "task": "请读取 a.txt 这个文件，把它的内容原样写进 b.txt。",
+  "expect": {
+    "stop": "final",
+    "tools": [
+      "read_file",
+      "write_file"
+    ],
+    "files": [
+      {
+        "path": "b.txt",
+        "exists": true
+      }
+    ]
+  }
+}
