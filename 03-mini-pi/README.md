@@ -10,16 +10,19 @@
 ## 一、版图：谁调谁
 
 ```
-内核.py ──→ loop.py ──→ core/llm.py ──→ DeepSeek API
-              │
-              ├──→ core/tools.py ──→ 文件系统 / 子进程
-              └──←── 结果字符串
+loop.py ──→ core/llm.py ──→ DeepSeek API
+   │
+   ├──→ core/tools.py ──→ 文件系统 / 子进程
+   └──←── 结果字符串
+
+⚠️ 入口层 内核.py 目前只有文档与 TODO（正文未实现）。
+   现在的实际入口是 loop.py 的 __main__ REPL；评测层也是直接调 loop.run_agent()。
 ```
 
 | 模块 | 职责 |
 |---|---|
-| `内核.py` | 入口：解析参数、驱动循环、输出进度 |
-| `loop.py` | 驱动：判定要不要调工具，串联模型与工具 |
+| `内核.py` | **入口（未实现）** —— 只有文档与 TODO；设计职责是解析参数、驱动循环、输出进度 |
+| `loop.py` | **当前实际入口 + 驱动**（在根目录，不在 `core/`）：多轮闭环、两个终止条件、REPL；`run_agent()` 被评测层直接调用 |
 | `core/llm.py` | **全项目唯一的模型出入口** |
 | `core/tools.py` | **唯一会改动磁盘或启动子进程的模块** |
 | `core/trace.py` | 每轮工具调用落盘（jsonl），可回溯 |
@@ -69,13 +72,22 @@ pip install openai python-dotenv
 python loop.py "把 a.txt 里的 hello 改成 world"
 
 # 评测（跑 cases/ 下所有用例）
-python -c "from core.evals import run_all; run_all()"
+# 评测：跑 cases/ 下所有用例，每条跑 3 轮，pass^3 才算过
+python -m core.evals
 ```
 
-`trace/` 下是历史运行轨迹，可以直接打开看每一步：
-```json
-{"turn": 1, "tool": "read_file", "args": {"path": "a.txt"}, "ok": true}
+`trace/` 下是历史运行轨迹，可以直接打开看每一步。真实内容长这样（录自 `trace/2026-11-07_111315_389228.jsonl`；**第 2 行 `content` 字段已截断，完整内容见源文件**）：
+
+```jsonl
+{"type": "tool_call", "turn": 1, "name": "read_file", "args": "{\"path\": \"a.txt\"}", "md5": "0a8c1b0d5dfb", "len": 34, "ts": "11:13:16"}
+{"type": "tool_call", "turn": 2, "name": "write_file", "args": "{\"path\": \"b.txt\", \"content\": \"...\"}", "md5": "bd3ddf1daf5a", "len": 16, "ts": "11:13:17"}
+{"type": "final", "turn": 4, "chars": 96, "ts": "11:13:18"}
 ```
+
+字段含义：
+- `name` 是工具名（不是 `tool`）；`args` 是**原始字符串**（不是对象）
+- `md5` / `len` 是参数指纹与长度 —— 用来判断「同样的调用有没有重复」
+- 末尾 `type: "final"` 是正常终止标记（没有它说明这次是被截断的）
 
 ---
 
@@ -87,9 +99,11 @@ python -c "from core.evals import run_all; run_all()"
 | 多轮闭环 + 双终止条件 | ✅ |
 | 工具层（读/写/跑） | ✅ |
 | trace 落盘 | ✅ |
-| case 回归集 + 评测 | ✅（1 个用例） |
+| case 回归集 + 评测 | ✅（1 个用例，含 fixture） |
+| 工具序列断言 | ✅ `case.expect.tools_must` / `tools_forbidden`：不只判结果，还判「该调的工具调了没、不该调的有没有调」 |
+| pass^k（可靠性） | ✅ 每条用例跑 3 轮（`RUNS = 3`），**全过才算过**；报告同时给单次通过率与 pass^3 |
 | **自进化模块** | ⬜ **未完成** —— 计划：把参数化配置 + 评测线接起来，自动搜索更优配置 |
-| 安全 | ⚠️ 无沙箱：工具直接改真实磁盘，没有路径白名单和危险命令拦截 |
+| 安全 | ⚠️ **评测有沙箱，裸跑没有**：`core/evals.py` 每条用例建独立临时目录（`%TEMP%\mini_pi_*`）+ `os.chdir` + `finally` 销毁，**异常路径也销毁**；但 `python loop.py` 裸跑是直接操作当前目录，没有路径白名单和危险命令拦截 |
 
 ⭐ **最后两条是最该被追问的地方，也是最诚实的部分。**
 
