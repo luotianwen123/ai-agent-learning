@@ -7,14 +7,16 @@
   "task": "请读取 a.txt 这个文件，把它的内容原样写进 b.txt。",
   "expect": {
     "stop": "final",
-    "tools": [
+    "tools_must": [
       "read_file",
       "write_file"
     ],
+    "tools_forbidden": [],
     "files": [
       {
         "path": "b.txt",
-        "exists": true
+        "exists": true,
+        "same_bytes_as": "a.txt"
       }
     ]
   }

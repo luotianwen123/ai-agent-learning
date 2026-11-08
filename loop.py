@@ -41,7 +41,7 @@ load_dotenv()
 MAX_TURNS = 20                                # 强制退出上限，防止死循环烧钱
 
 
-def run_agent(task: str, messages: list | None = None) -> str:
+def run_agent(task: str, messages: list | None = None, trace_path=None) -> str:
     """多轮驱动：模型自主决定工具调用次数，直到作答或达到轮数上限。
 
     messages 由调用方传入时，本次任务追加到既有会话上 —— 模型能看见前几轮
@@ -50,7 +50,7 @@ def run_agent(task: str, messages: list | None = None) -> str:
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": task})
-    trace_path = trace.new_trace()           # 一次任务一个轨迹文件，与 messages 同生命周期
+    trace_path = trace_path or trace.new_trace()          # 一次任务一个轨迹文件，与 messages 同生命周期
 
     for turn in range(1, MAX_TURNS + 1):
         # ---------- 本轮调用：获取模型意图 ----------
