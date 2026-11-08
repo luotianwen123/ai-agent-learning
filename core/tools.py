@@ -97,16 +97,32 @@ TOOLS = [
 #   3. 返回值恒为 str，调用方无需做类型判断
 
 def read_file(path):
-    """读文件，返回全文。失败时返回错误字符串，不抛异常。"""
+    """读文件，返回「头信息行 + 全文」。失败时返回错误字符串，不抛异常。"""
     # 预检查：文件不存在是最常见的失败，单独给出可读描述
     # （模型读到「文件不存在」可直接转去列目录，无需猜测原因）
     if not os.path.exists(path):
         return f"错误：文件不存在 {path}"
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        # 以二进制读入、再自行解码，而非直接以文本模式打开：
+        # 头信息要上报总字节数，必须统计原始字节。
+        # 若先按 str 读再 len(content)，得到的是字符数 ——
+        # 中文按 UTF-8 编码为 3 字节，字节数才是磁盘实际占用量
+        # （与 write_file 上报 len(content.encode()) 的口径一致）。
+        with open(path, "rb") as f:
+            data = f.read()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            # 编码失败单独报出：模型读到「非 UTF-8」可改用 run + type
+            # 或换编码读取，而不是面对一段含混的裸异常文本
+            return f"错误：读取失败，文件不是 UTF-8 编码 {path}：{e}"
+        # 是否以换行结尾：模型据此决定追加内容前要不要先补 \n，
+        # 否则两次 write_file 拼接时行会粘连
+        ends_with_newline = "是" if text.endswith("\n") else "否"
+        # 头信息只占一行，与正文以 \n 分隔；正文原样返回不作改动
+        return f"〔共 {len(data)} 字节，以换行结尾：{ends_with_newline}〕\n{text}"
     except Exception as e:
-        # 兜底：文件存在但不可读（权限、编码、路径实际为目录等）
+        # 兜底：文件存在但不可读（权限、路径实际为目录等）
         return f"错误：读取失败 {e}"
 
 
