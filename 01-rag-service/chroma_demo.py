@@ -15,7 +15,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-# 🔴 放纯英文路径（家目录），不放项目目录
+# 放纯英文路径（家目录），不放项目目录
 # 项目目录叫 "ai agent的初次尝试" —— 有中文、有空格。
 # Chroma 1.x 的 rust 后端处理非 ASCII 路径会报 Error loading hnsw index
 # （现象：同一进程刚写完能查，换个进程就读不出来）。详见 chroma_store.py 顶部说明。

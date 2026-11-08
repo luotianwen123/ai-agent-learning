@@ -28,7 +28,7 @@ def run_one(case):
     # 延迟 import 放函数内：loop.py 顶层会 load_dotenv() 并拉起 core/llm.py，
     # 摆到模块顶层的话，"只想读用例清单"（dataset.list_cases）也会被拖进去 ——
     # 没配 key 的环境连用例都列不出来。
-    # 🔴 run_agent 在项目根 loop.py，**不在 core/ 包里**，所以是 from loop。
+    # run_agent 在项目根 loop.py，**不在 core/ 包里**，所以是 from loop。
     from loop import run_agent
 
     # 先建轨迹：trace.new_trace() 内部用的 TRACE_DIR 是绝对路径，
@@ -56,11 +56,10 @@ def run_one(case):
     finally:
         # 无论成功失败都切回来，否则后续用例的沙箱路径判断会错乱
         os.chdir(old_cwd)
-        # 🔴 异常路径必须在这里销毁沙箱 —— 别指望外层。
+        # 异常路径必须在这里销毁沙箱 —— 别指望外层。
         # run_rounds 的 except 分支是新建一个 row、sandbox 字段填 None，
         # 它手上根本没有沙箱路径，销毁自然跳过。
-        # %TEMP%\mini_pi_8ym4lfp9 就是这么漏的：10:26 那次 check() 抛 TypeError，
-        # 目录带着写了一半的 b.txt 一直躺到 11:13 才被发现。
+        # 曾出现 check() 抛异常时沙箱目录被遗留（含写了一半的产物），数小时后才发现。
         # 正常返回时 ok=True，沙箱留给 check 用，由 run_rounds 销毁。
         if not ok:
             dataset.destroy_sandbox(sandbox)
@@ -179,7 +178,7 @@ def check(row, case):
         events = read_events(trace_path)
         called = [e.get("name") for e in events if e.get("type") == "tool_call"]
 
-        # 🔴 轨迹缺失必须单独报 FAIL，不能让它悄悄溜过去。
+        # 轨迹缺失必须单独报 FAIL，不能让它悄悄溜过去。
         # 否则 called = [] 时：tools_must 会因为「缺工具」判 FAIL（fail-closed，还好），
         # 但 tools_forbidden 会因为「一次都没调」判 PASS —— 这是 fail-open：
         # 没有证据 ≠ 没有违规。删掉那条读取日志，就等于给自己发了一张无违规证明。

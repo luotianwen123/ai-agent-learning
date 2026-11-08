@@ -17,10 +17,10 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 
 import chromadb
 
-# 🔴 用 __file__ 定位，不写 "./xxx"
+# 用 __file__ 定位，不写 "./xxx"
 # 写 "./" 的意思是"我敲命令时所在的目录"，不是"这个脚本所在的目录"
 #
-# 🔴🔴 而且故意放在纯英文路径下，不放项目目录
+# 而且故意放在纯英文路径下，不放项目目录
 # 项目目录叫 "ai agent的初次尝试" —— 有中文、有空格。
 # Chroma 1.x 的 rust 后端处理非 ASCII 路径时会出问题：
 #   报 Error loading hnsw index / backfill request to compactor，
