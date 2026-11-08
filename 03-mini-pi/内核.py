@@ -17,6 +17,6 @@ TODO：待实现
 出：终端输出 + Agent 实际改动的文件（副作用）
 
 【边界】
-不承载具体逻辑。循环在 core/loop.py，工具在 core/tools.py，
+不承载具体逻辑。循环在根目录 loop.py（不在 core/），工具在 core/tools.py，
 模型调用在 core/llm.py。本文件只负责串联与交互。
 """
