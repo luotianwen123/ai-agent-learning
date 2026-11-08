@@ -1,0 +1,12 @@
+{
+  "id": "copy_by_command",
+  "tags": ["regression", "tool-choice"],
+  "task": "把 a.txt 复制成 b.txt，内容要一字不差。",
+  "expect": {
+    "tools_must": ["run"],
+    "tools_forbidden": ["write_file"],
+    "files": [
+      { "path": "b.txt", "exists": true, "same_bytes_as": "a.txt" }
+    ]
+  }
+}

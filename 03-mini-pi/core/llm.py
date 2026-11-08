@@ -51,5 +51,6 @@ def ask(messages, tools=None):
         model=MODEL,
         messages=messages,
         tools=tools,
+        temperature=0,
     )
     return resp.choices[0].message
