@@ -1,3 +1,0 @@
-{"type": "tool_call", "turn": 1, "name": "read_file", "args": "{\"path\": \"a.txt\"}", "md5": "714ea3fc1300", "len": 52, "result": "〔共 74 字节，以换行结尾：是〕\n这是 a.txt 里的真实内容：苹果 5 元一斤，香蕉 3 元一斤\n", "truncated": false, "ts": "20:59:59"}
-{"type": "tool_call", "turn": 2, "name": "write_file", "args": "{\"path\": \"b.txt\", \"content\": \"这是 a.txt 里的真实内容：苹果 5 元一斤，香蕉 3 元一斤\\n\"}", "md5": "d42a97c6b0e7", "len": 16, "result": "已写入 74 字节到 b.txt", "truncated": false, "ts": "21:00:00"}
-{"type": "final", "turn": 3, "chars": 103, "ts": "21:00:02"}
