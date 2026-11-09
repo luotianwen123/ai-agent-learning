@@ -53,17 +53,67 @@ def load_case(case_dir):
 
 
 def list_cases(tag=None):
-    """列出 CASES_DIR 下所有合法用例。给了 tag 就只留含该标签的。"""
+    """列出 CASES_DIR 下所有合法用例。给了 tag 就只留含该标签的。
+
+    🔴 id 必须唯一 —— 这不是洁癖，是评测报告的分组键。
+    report() 用 case["id"] 分组打印、pass^k 也用 id 当条目名。
+    两条用例 id 相同 ⇒ 报告里出现两行同名结果，人分不清哪个是哪个；
+    更坏的情况是两条用例的 case.json 被写成了同一份内容（11-07 那次
+    「6/6 全绿」的真身：同一件事做了六遍），此时不报错、数字还很好看。
+
+    所以这里做三件事，缺一不可：
+      ① 没有 id        → 报错（否则报告里出现 None 分组）
+      ② id 重复        → 报错（否则用例身份不唯一，报告不可信）
+      ③ id ≠ 目录名    → 只警告（不影响正确性，但报告里的 id 追不回目录）
+
+    为什么是「抛异常」而不是「跳过坏用例继续跑」：
+    用 delete 掉一条用例就能把失败变成通过 —— 这是 remove_risk 式作弊。
+    用例定义错误属于配置错误，配置错了，这一批的结果就不该被采信。
+    """
     if not CASES_DIR.is_dir():
         return []
+
     out = []
+    problems = []
+    seen = {}          # id -> 首次出现的目录名，用来报「和谁撞了」
+
     for d in sorted(CASES_DIR.iterdir()):
         if not d.is_dir() or not (d / "case.json").exists():
             continue
         meta = load_case(d)
+
+        cid = meta.get("id")
+        if not cid:
+            problems.append(f"{d.name}/：case.json 缺 id 字段")
+            continue
+        if cid in seen:
+            problems.append(
+                f"id 重复：「{cid}」同时出现在 {seen[cid]}/ 和 {d.name}/ "
+                f"—— 报告按 id 分组，两条会被合成一条，数字看着对、测的却是同一件事"
+            )
+            continue
+        seen[cid] = d.name
+
+        # 只警告不阻断：id 与目录名不一致不影响评测正确性，
+        # 但报告里出现 id 时，人得能一眼找到对应的用例目录
+        if cid != d.name:
+            print(
+                f"⚠️ 用例 id「{cid}」与目录名「{d.name}」不一致 —— "
+                f"报告里按 id 找不到目录，排查会多一步。建议改成一致。",
+                file=sys.stderr,
+            )
+
         if tag and tag not in meta.get("tags", []):
             continue
         out.append(meta)
+
+    # 一次性把全部问题报完：逐条试错会让人改一轮跑一轮，来回三次才清干净
+    if problems:
+        raise ValueError(
+            "用例定义有误，已拒绝本次评测（不是跳过坏用例继续跑）：\n  - "
+            + "\n  - ".join(problems)
+            + "\n修法：把 case.json 里的 id 改成与目录名一致、且互不重复。"
+        )
     return out
 
 

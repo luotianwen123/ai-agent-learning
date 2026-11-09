@@ -80,6 +80,8 @@ def run_agent(task: str, messages: list | None = None, trace_path=None) -> str:
                 args=tc.function.arguments,
                 md5=hashlib.md5(result.encode("utf-8")).hexdigest()[:12],
                 len=len(result),
+                result=trace.brief(result),
+                truncated=len(result) > trace.BRIEF_HEAD + trace.BRIEF_TAIL,
             )
             messages.append({
                 "role": "tool",               # 固定为 tool，写 user 会被 API 拒绝
