@@ -28,7 +28,7 @@ def run_one(case):
     # 延迟 import 放函数内：loop.py 顶层会 load_dotenv() 并拉起 core/llm.py，
     # 摆到模块顶层的话，"只想读用例清单"（dataset.list_cases）也会被拖进去 ——
     # 没配 key 的环境连用例都列不出来。
-    # 🔴 run_agent 在项目根 loop.py，**不在 core/ 包里**，所以是 from loop。
+    # run_agent 在项目根 loop.py，**不在 core/ 包里**，所以是 from loop。
     from loop import run_agent
 
     # 先建轨迹：trace.new_trace() 内部用的 TRACE_DIR 是绝对路径，
@@ -56,11 +56,10 @@ def run_one(case):
     finally:
         # 无论成功失败都切回来，否则后续用例的沙箱路径判断会错乱
         os.chdir(old_cwd)
-        # 🔴 异常路径必须在这里销毁沙箱 —— 别指望外层。
+        # 异常路径必须在这里销毁沙箱 —— 别指望外层。
         # run_rounds 的 except 分支是新建一个 row、sandbox 字段填 None，
         # 它手上根本没有沙箱路径，销毁自然跳过。
-        # %TEMP%\mini_pi_8ym4lfp9 就是这么漏的：10:26 那次 check() 抛 TypeError，
-        # 目录带着写了一半的 b.txt 一直躺到 11:13 才被发现。
+        # 曾出现 check() 抛异常时沙箱目录被遗留（含写了一半的产物），数小时后才发现。
         # 正常返回时 ok=True，沙箱留给 check 用，由 run_rounds 销毁。
         if not ok:
             dataset.destroy_sandbox(sandbox)
@@ -174,22 +173,42 @@ def check(row, case):
     # 那是好行为，精确相等会把它判成失败，测试立刻变 brittle。
     tools_must = expect.get("tools_must") or []
     tools_forbidden = expect.get("tools_forbidden") or []
-    if tools_must or tools_forbidden:
+    stop = expect.get("stop")
+
+    # 「怎么停的」也是一条断言，且是这三条里最容易漏的一条。
+    # 现在 trace 里只有三种终止事件：final（模型认为够了）/ max_turns（撞满上限被掐断）。
+    # 不查它会出现这种假绿：模型来回折腾 20 轮，最后被强制退出，
+    # 但恰好文件已经写对了 —— 文件断言全过，报告显示 PASS。
+    # 人看到的是「这条用例过」，实际发生的是「Agent 没完成任务，是撞墙停的」。
+    # 用例只要不写 stop 就不查这一条（向后兼容，现有的 case.json 不用改）。
+    if tools_must or tools_forbidden or stop:
         trace_path = row.get("trace")
         events = read_events(trace_path)
         called = [e.get("name") for e in events if e.get("type") == "tool_call"]
 
-        # 🔴 轨迹缺失必须单独报 FAIL，不能让它悄悄溜过去。
+        # 轨迹缺失必须单独报 FAIL，不能让它悄悄溜过去。
         # 否则 called = [] 时：tools_must 会因为「缺工具」判 FAIL（fail-closed，还好），
         # 但 tools_forbidden 会因为「一次都没调」判 PASS —— 这是 fail-open：
         # 没有证据 ≠ 没有违规。删掉那条读取日志，就等于给自己发了一张无违规证明。
+        # 断言名用 trace 而不是 tools:trace：这段现在也覆盖 stop，
+        # 只在工具断言时才叫 tools 就不准了。
         if not events:
             results.append((
-                "tools:trace",
+                "trace",
                 False,
-                f"轨迹缺失或为空，无法断言工具序列：{trace_path}",
+                f"轨迹缺失或为空，无法断言工具序列与终止原因：{trace_path}",
             ))
         else:
+            if stop:
+                # 终止事件取最后一条：中间可能有过 final 以外的写入，但真正结束的只有最后那次
+                terminals = [e.get("type") for e in events if e.get("type") in ("final", "max_turns")]
+                actual = terminals[-1] if terminals else None
+                results.append((
+                    "stop",
+                    actual == stop,
+                    f"期望终止于 {stop}，实际 {actual or '轨迹里没有任何终止事件（进程被 kill？）'}",
+                ))
+
             if tools_must:
                 ok, note = _check_order(tools_must, called)
                 results.append(("tools:must", ok, note))

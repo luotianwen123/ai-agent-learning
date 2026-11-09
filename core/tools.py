@@ -254,7 +254,7 @@ if __name__ == "__main__":
     # 直接对当前仓库执行 git log 会依赖「当前目录恰为 git 仓库且最新提交为中文」，
     # 换目录即失效。故此处自建临时仓库并提交一条中文 message，再读回校验。
     #
-    # 🔴 仓库建在系统临时目录，不建在项目里。
+    # 仓库建在系统临时目录，不建在项目里。
     # 原写法在 cwd 下建 _test_repo，PyCharm 一看见项目内出现 .git 就把该目录注册成 VCS 根；
     # 自测结束时目录被删，注册记录却留着，于是每次打开项目都弹
     # 「无效 VCS 根映射：core\_test_repo」。自测产物不该污染项目目录，这是通例。
@@ -291,7 +291,7 @@ if __name__ == "__main__":
 
     # 清理自测产物（临时 git 仓库在系统临时目录，不在项目里）
     #
-    # 🔴 这里不能用 shutil.rmtree(..., ignore_errors=True)：
+    # 这里不能用 shutil.rmtree(..., ignore_errors=True)：
     # git init 会在 .git/objects 下建只读文件，Windows 上 rmtree 遇到只读文件就失败，
     # 而 ignore_errors=True 让这次失败**完全无声** —— 目录留在 %TEMP% 里，
     # 跑几十次自测就是几十个残留。走 shell 的 rd /s /q 会强制处理只读属性。
