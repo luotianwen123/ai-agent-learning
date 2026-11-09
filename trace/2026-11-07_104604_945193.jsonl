@@ -1,4 +1,0 @@
-{"type": "tool_call", "turn": 1, "name": "read_file", "args": "{\"path\": \"a.txt\"}", "md5": "0a8c1b0d5dfb", "len": 34, "ts": "10:46:07"}
-{"type": "tool_call", "turn": 2, "name": "write_file", "args": "{\"path\": \"b.txt\", \"content\": \"这是 a.txt 里的真实内容：苹果 5 元一斤，香蕉 3 元一斤\"}", "md5": "bd3ddf1daf5a", "len": 16, "ts": "10:46:08"}
-{"type": "tool_call", "turn": 3, "name": "read_file", "args": "{\"path\": \"b.txt\"}", "md5": "d207e5d3bcb9", "len": 33, "ts": "10:46:09"}
-{"type": "final", "turn": 4, "chars": 94, "ts": "10:46:10"}
