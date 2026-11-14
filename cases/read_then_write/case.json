@@ -12,6 +12,8 @@
       "write_file"
     ],
     "tools_forbidden": [],
+    "receipt": true,
+    "skill_injected": "file-copy",
     "files": [
       {
         "path": "b.txt",

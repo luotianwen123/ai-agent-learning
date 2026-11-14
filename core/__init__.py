@@ -6,10 +6,14 @@
 
 主链路（一次任务的完整路径）：
 
-    内核.py ──→ loop.py ──→ core/llm.py ──→ DeepSeek API
-                  │
-                  ├──→ core/tools.py ──→ 文件系统 / 子进程
-                  └──←── 结果字符串
+    loop.py ──→ core/llm.py ──→ DeepSeek API
+       │
+       ├──→ core/tools.py ──→ 文件系统 / 子进程
+       └──←── 结果字符串
+
+入口（2026-11-13 起；原占位文件 内核.py 已删除）：
+    python loop.py            loop.py 的 __main__ REPL，交互式
+    python -m core.evals      批量评测，直接调 loop.run_agent()
 
 不参与运行：
 
@@ -22,7 +26,7 @@
 
     数据                     传递路径                 类型
     ─────────────────────────────────────────────────────────────
-    messages 列表            内核 → loop → llm       字典列表，只增不减
+    messages 列表            loop → llm              字典列表，只增不减
     name + arguments_json    loop → tools            字符串
     工具返回值               tools → loop            字符串
 
@@ -30,8 +34,8 @@
 三、各模块职责
 ═══════════════════════════════════════════════════════════════
 
-    内核.py            入口。解析参数、驱动循环、输出进度
-    loop.py            驱动。判定是否需要调用工具，串联模型与工具
+    loop.py            驱动 + 事实入口。判定是否调用工具，串联模型与工具；
+                       __main__ 提供 REPL，run_agent() 被评测层直接调用
     core/llm.py        模型调用层。全项目唯一的模型出入口
     core/tools.py      工具层。唯一会改动磁盘或启动子进程的模块
     core/__init__.py   包标记，使 from core.xxx import 成立
@@ -41,7 +45,7 @@
 四、一次任务的数据流向
 ═══════════════════════════════════════════════════════════════
 
-    ① 入口接收任务描述
+    ① loop.py 的 __main__ REPL 接收任务描述（评测时由 evals 传入 case["task"]）
     ② 构造 messages = [{"role": "user", "content": "..."}]
     ③ loop 以 messages + TOOLS 调用 core/llm.py 的 ask()
     ④ core/llm.py 发起 HTTP 请求，取回一条 message

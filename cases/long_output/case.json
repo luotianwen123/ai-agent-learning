@@ -7,6 +7,8 @@
   "task": "请读取 a.txt，把它的全文一字不差地写入 b.txt，然后回读 b.txt 确认字节数。",
   "expect": {
     "stop": "final",
+    "receipt": true,
+    "skill_injected": "file-copy",
     "tools_must": [
       "read_file",
       "write_file"
