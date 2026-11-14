@@ -1,8 +1,7 @@
 """tests/test_checks.py —— 评测中台的零依赖回归测试
 
 【为什么是 unittest（标准库）不是 pytest】
-2026-11-12 实测 `pip show pytest` 在本机 venv 里没有安装（退出码 1）。
-不擅自装包、不写死版本，所以用标准库跑，命令：
+本项目不引入第三方测试依赖，用标准库跑，命令：
     Terminal 敲（cwd = 项目根）：
     python -m unittest discover -s tests -v
 这套测试不联网、不需要 key、不碰项目源码、不建沙箱；

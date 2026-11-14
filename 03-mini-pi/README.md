@@ -117,7 +117,7 @@ python -m core.evals --compare reports/A.json reports/B.json
 # 按报告回放证据：打印每轮轨迹路径与事件序列，缺证据就非零退出
 python -m core.evals --evidence reports/A.json
 
-# 零依赖回归测试（本机 venv 未装 pytest，用标准库 unittest）
+# 零依赖回归测试（标准库 unittest，不需要安装任何第三方包）
 python -m unittest discover -s tests -v
 ```
 
