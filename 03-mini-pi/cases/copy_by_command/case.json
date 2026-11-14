@@ -5,6 +5,8 @@
   "expect": {
     "tools_must": ["run"],
     "tools_forbidden": ["write_file"],
+    "receipt": true,
+    "skill_injected": "file-copy",
     "files": [
       { "path": "b.txt", "exists": true, "same_bytes_as": "a.txt" }
     ]

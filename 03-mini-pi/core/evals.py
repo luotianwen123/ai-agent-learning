@@ -1,8 +1,30 @@
-"""core/evals.py —— 评测层：跑用例 → 断言 → 报告"""
+"""core/evals.py —— 评测中台：统一入口 / 跑用例 / 落报告 / 前后对比 / 自检
 
+【它最终解决什么】
+以前评测只有「终端打印一次结果」，改完代码全凭眼睛看，没法证明没改坏。
+现在三件事都能一条命令做完：
+    python -m core.evals                     跑全套 + 报告落盘 reports/
+    python -m core.evals --selfcheck         故意改坏，断言必须报警（不联网、不需要 key）
+    python -m core.evals --compare A.json B.json   两份报告前后对比，发现退化就非零退出
+    python -m core.evals --evidence reports/A.json 按报告回放：打印每轮轨迹路径并校验证据
+⇒ 「改了能证明没改坏」和「这个 PASS 凭什么」都从口头变成机器判据，CI 能直接接。
+
+【为什么断言不在本文件】
+check() 曾经是个 150 行的大函数，四类断言和安全防护全挤在一起。
+已全部搬到 core/checks.py 的注册表：新增一类断言 = 加一个 @register 函数，
+本文件一行不动。check() 现在只有一行 return。
+
+【边界】
+run_one / run_rounds / report / round_ok 的签名与行为保持向后兼容 ——
+_scratch 里的桥接脚本、桩驱动仍按原接口调用。
+报告目录用 __file__ 定位，不用 cwd（评测会 chdir 到临时沙箱）。
+"""
+
+import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # 直接运行 core/evals.py 时，sys.path[0] 是 core/ 而不是项目根，
@@ -10,18 +32,25 @@ from pathlib import Path
 # 这里把项目根补进去；用 `python -m core.evals` 从项目根运行时，这行是空操作，无害。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import dataset, trace
+from core import checks, dataset, trace
+
+# 向后兼容：外部脚本（_scratch/action_card/bridge.py 等）一直调 evals.read_events
+read_events = checks.read_events
 
 # 一条用例跑几次。Agent 是非确定性系统，跑一次等于抛硬币：
 # 单次通过率 90% 的用例，连跑 5 次全过只有 59%（0.9⁵）。
 # 业界 minimum 是 5（τ-bench 用 5 或 8）；开发调试用 3 省时间，正式报数改 5。
 RUNS = 3
 
+REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
 
-def run_one(case):
+
+def run_one(case, approver="eval", ask_fn=None):
     """跑一条用例，返回结果字典。
 
     进：case（就在脚边，不用参数）
+        approver 批准策略，评测默认 eval（自动批准且标记 eval:auto）
+        ask_fn   模型调用注入点；传桩函数即可离线跑完整主链
     出：{"id": ..., "sandbox": 沙箱路径, "answer": 模型最终回答, "trace": 轨迹文件路径}
     做：建轨迹 → 造沙箱 → 切 cwd 到沙箱 → 调 run_agent(task, trace_path) → 切回 → 返回
     """
@@ -45,7 +74,10 @@ def run_one(case):
         os.chdir(sandbox)
         # trace_path 由评测层建好再传进去，run_agent 不再自己 new_trace()，
         # 这样评测层才能拿到轨迹文件路径、与结果一并落进报告
-        answer = run_agent(case["task"], trace_path=trace_path)
+        answer = run_agent(
+            case["task"], trace_path=trace_path,
+            approver=approver, ask_fn=ask_fn,
+        )
         ok = True
         return {
             "id": case.get("id"),
@@ -65,172 +97,22 @@ def run_one(case):
             dataset.destroy_sandbox(sandbox)
 
 
-def read_events(trace_path):
-    """读 JSONL 轨迹，返回事件列表。读不到、坏行，一律跳过 —— 不抛异常。
-
-    同一条原则：断言函数不许抛。trace 正被占用、进程被 kill 时文件可能写到一半，
-    但那不该把整条用例变成 ERROR —— 拿不到轨迹就断言「轨迹里没有禁止调用」，
-    该报 FAIL 就报 FAIL，而不是让整个进程死掉。
-    """
-    if not trace_path:
-        return []
-    events = []
-    try:
-        with open(trace_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue          # 半行（写一半被 kill）直接跳过
-    except OSError:
-        return []
-    return events
-
-
-def _check_order(need, called):
-    """need 是否按**顺序**出现在 called 里，允许中间插别的调用。返回 (ok, 说明)。
-
-    这是 superset（超集）语义：只要求该做的一个不漏、先后不乱，
-    不要求 called 和 need 长度相等。业内（Anthropic《Demystifying evals for
-    AI agents》）明确反对精确相等 —— 那个太 rigid，会把「多调一次自查」
-    这种好行为判成失败。
-    """
-    pos = 0
-    for name in need:
-        try:
-            pos = called.index(name, pos) + 1
-        except ValueError:
-            # 失败必须说清是**哪一种**：没调 vs 调了但顺序不对。
-            # 两者修法完全不同 —— 一个是模型不知道该调什么，一个是它知道但先做了后一步。
-            # 报告只写「不匹配」，人还得自己去翻轨迹，那这条断言的价值就少了一半。
-            if name in called:
-                return False, f"顺序不对：{name} 出现在它该出现的位置之前 —— 实际 {called}"
-            return False, f"缺少 {name} —— 实际只调用了 {called}"
-    return True, f"必须按序包含 {need}，实际 {called}"
-
-
 def check(row, case):
-    """按 case["expect"] 断言这次运行的事实，返回 [(断言名, True/False, 说明), ...]
+    """按 case["expect"] 断言这次运行的事实 —— 交给注册表。
 
-    进：
-      row  —— run_one 产出的事实：sandbox / answer / trace
-      case —— 用例定义：expect / _dir
-    出：断言三元组列表，交给 report 打印
-
-    🔴 断言函数绝不能抛异常：模型什么都没写，是最该被测的情况，
-    这时 (sandbox / path).read_bytes() 会抛 FileNotFoundError，
-    整条用例变成 ERROR —— 报告只显示「运行异常」，
-    看不出到底哪条断言没过。所以先判存在，再判内容。
+    🔴 本函数刻意只有一行：新增断言类型不许改这里。
+    所有防护（fail-open / fail-closed / 超集语义 / 异常兜底）都在 core/checks.py。
     """
-    expect = case.get("expect", {})
-    results = []
-
-    # ---------------- 文件类断言：查环境终态 ----------------
-    # 业内排序上这是第一层（outcome），比路径断言重要：
-    # agent 说「已写入 b.txt」不算数，磁盘上真有且字节对才算数。
-    sandbox = Path(row["sandbox"]) if row.get("sandbox") else None
-    if sandbox is not None:
-        for item in expect.get("files", []):
-            path = item.get("path", "")
-            # 拼的是「沙箱绝对路径 + 相对文件名」，与当前 cwd 无关 ——
-            # 项目根目录下恰好也有一份 a.txt / b.txt，一旦用相对路径就会查错地方
-            target = sandbox / path
-
-            # ---------- 断言 1：存在性 ----------
-            want = bool(item.get("exists", True))          # 缺省按「期望存在」处理
-            actual_exists = target.exists()
-            results.append((
-                f"files:{path}:exists",
-                actual_exists == want,
-                f"期望{'存在' if want else '不存在'}，实际{'存在' if actual_exists else '不存在'}",
-            ))
-            # 文件不在，就没内容可比；期望它不存在时也不该继续比
-            if not actual_exists or not want:
-                continue
-
-            # ---------- 断言 2：内容逐字节相同（可选） ----------
-            # 只有 case.json 里写了 same_bytes_as 才做。
-            # 用 .get()：用例 JSON 是人手改的文件，缺字段不能把整批拖崩
-            ref_name = item.get("same_bytes_as")
-            if not ref_name:
-                continue
-            ref = (Path(case["_dir"]) / "fixture" / ref_name).read_bytes()
-            actual = target.read_bytes()
-            results.append((
-                f"files:{path}:bytes",
-                actual == ref,
-                f"期望与 {ref_name} 逐字节相同，实际 {len(actual)} 字节 / 参考 {len(ref)} 字节",
-            ))
-
-    # ---------------- 工具序列断言：查路径上的不变量 ----------------
-    # 业内做法不是比精确序列，而是只断言两类不变量：
-    #   ① tools_must      该做的一个不许漏、先后不许乱（允许额外调用）
-    #   ② tools_forbidden 不该做的一次都不许出现
-    # 依据：同一条用例两次运行，模型一次多调了 `run type b.txt` 自查 ——
-    # 那是好行为，精确相等会把它判成失败，测试立刻变 brittle。
-    tools_must = expect.get("tools_must") or []
-    tools_forbidden = expect.get("tools_forbidden") or []
-    stop = expect.get("stop")
-
-    # 「怎么停的」也是一条断言，且是这三条里最容易漏的一条。
-    # 现在 trace 里只有三种终止事件：final（模型认为够了）/ max_turns（撞满上限被掐断）。
-    # 不查它会出现这种假绿：模型来回折腾 20 轮，最后被强制退出，
-    # 但恰好文件已经写对了 —— 文件断言全过，报告显示 PASS。
-    # 人看到的是「这条用例过」，实际发生的是「Agent 没完成任务，是撞墙停的」。
-    # 用例只要不写 stop 就不查这一条（向后兼容，现有的 case.json 不用改）。
-    if tools_must or tools_forbidden or stop:
-        trace_path = row.get("trace")
-        events = read_events(trace_path)
-        called = [e.get("name") for e in events if e.get("type") == "tool_call"]
-
-        # 轨迹缺失必须单独报 FAIL，不能让它悄悄溜过去。
-        # 否则 called = [] 时：tools_must 会因为「缺工具」判 FAIL（fail-closed，还好），
-        # 但 tools_forbidden 会因为「一次都没调」判 PASS —— 这是 fail-open：
-        # 没有证据 ≠ 没有违规。删掉那条读取日志，就等于给自己发了一张无违规证明。
-        # 断言名用 trace 而不是 tools:trace：这段现在也覆盖 stop，
-        # 只在工具断言时才叫 tools 就不准了。
-        if not events:
-            results.append((
-                "trace",
-                False,
-                f"轨迹缺失或为空，无法断言工具序列与终止原因：{trace_path}",
-            ))
-        else:
-            if stop:
-                # 终止事件取最后一条：中间可能有过 final 以外的写入，但真正结束的只有最后那次
-                terminals = [e.get("type") for e in events if e.get("type") in ("final", "max_turns")]
-                actual = terminals[-1] if terminals else None
-                results.append((
-                    "stop",
-                    actual == stop,
-                    f"期望终止于 {stop}，实际 {actual or '轨迹里没有任何终止事件（进程被 kill？）'}",
-                ))
-
-            if tools_must:
-                ok, note = _check_order(tools_must, called)
-                results.append(("tools:must", ok, note))
-
-            if tools_forbidden:
-                hit = [n for n in called if n in set(tools_forbidden)]
-                results.append((
-                    "tools:forbidden",
-                    not hit,
-                    f"禁调 {tools_forbidden}，实际"
-                    + (f"调用了 {hit}" if hit else "一次都没调"),
-                ))
-    return results
+    return checks.run_all(row, case)
 
 
 def round_ok(row):
     """这一轮是否全过。空断言列表不算通过 —— all([]) 返回 True，是假绿。"""
-    checks = row.get("checks") or []
-    return bool(checks) and all(ok for _, ok, _ in checks)
+    checks_done = row.get("checks") or []
+    return bool(checks_done) and all(ok for _, ok, _ in checks_done)
 
 
-def run_rounds(case, runs):
+def run_rounds(case, runs, approver="eval", ask_fn=None):
     """把一条用例跑 runs 次，返回每轮的 row 列表。
 
     🔴 每轮必须重新造沙箱：沙箱就是为这件事存在的。上一轮模型写出的 b.txt
@@ -244,7 +126,7 @@ def run_rounds(case, runs):
     rounds = []
     for i in range(1, runs + 1):
         try:
-            row = run_one(case)
+            row = run_one(case, approver=approver, ask_fn=ask_fn)
             row["checks"] = check(row, case)
         except Exception as e:
             # 一条用例炸掉不能带走整批：API 超时、限流、网络断在批量评测里是常态
@@ -286,11 +168,11 @@ def report(groups):
         for i, r in enumerate(rounds, 1):
             if round_ok(r):
                 continue
-            checks = r.get("checks") or []
+            checks_done = r.get("checks") or []
             print(f"       第 {i} 轮失败：")
-            if not checks:
+            if not checks_done:
                 print("         （没有生成任何断言结果）")
-            for name, ok, note in checks:
+            for name, ok, note in checks_done:
                 if not ok:
                     print(f"         {name} —— {note}")
 
@@ -303,7 +185,278 @@ def report(groups):
     print(f"pass^{RUNS}：{all_pass}/{len(groups)} 条用例 {RUNS} 次全过")
 
 
+# ==================== 报告落盘与前后对比 ====================
+
+def build_report(groups):
+    """把一次评测压成可存档、可 diff（比对）的 dict（字典）。
+
+    checks_registered 一并记下：两次报告的断言集不同时，通过率不能直接比 ——
+    否则「把断言删掉」也能伪装成通过率上升。
+    """
+    cases = {}
+    total_rounds = passed_rounds = all_pass = 0
+    for case_id, rounds in groups:
+        n = len(rounds)
+        c = sum(1 for r in rounds if round_ok(r))
+        total_rounds += n
+        passed_rounds += c
+        if c == n:
+            all_pass += 1
+        failed = {}
+        evidence = []
+        for i, r in enumerate(rounds, 1):
+            bad = [name for name, ok, _ in (r.get("checks") or []) if not ok]
+            if bad:
+                failed[str(i)] = bad
+            # 报告 → 轨迹的溯源链。只存相对路径：远端是公开仓库，
+            # 本机绝对路径进报告就是 11-08 那次安全事件重演。
+            # 不存 note（说明文本）：里面可能带沙箱绝对路径或本机路径。
+            tp = r.get("trace")
+            evidence.append({
+                "round": i,
+                "ok": round_ok(r),
+                "trace": f"trace/{Path(tp).name}" if tp else None,
+                "checks": [{"name": name, "ok": bool(ok)}
+                           for name, ok, _ in (r.get("checks") or [])],
+            })
+        cases[case_id] = {
+            "rounds": n, "passed": c, "pass_k": c == n, "failed_checks": failed,
+            "evidence": evidence,
+        }
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "runs": RUNS,
+        "cases": cases,
+        "total_rounds": total_rounds,
+        "passed_rounds": passed_rounds,
+        "single_rate": round(passed_rounds / total_rounds * 100, 1)
+                       if total_rounds else None,
+        "pass_k": f"{all_pass}/{len(groups)}",
+        "checks_registered": checks.list_checks(),
+    }
+
+
+def save_report(groups, path=None):
+    """报告写进 reports/，返回路径。用 __file__ 定位，不用 cwd。"""
+    data = build_report(groups)
+    if path is None:
+        REPORT_DIR.mkdir(exist_ok=True)
+        path = REPORT_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}.json"
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def compare_reports(old_path, new_path):
+    """两份报告前后对比。发现退化返回 False（命令行据此非零退出，CI 能拦）。
+
+    退化判据三条，任一命中即算退化：
+      ① 某条用例从 pass^k 全过变成没全过
+      ② 套件单次通过率下降
+      ③ 断言集变了 —— 不叫退化，但必须提示「数字不能直接比」
+    """
+    old = json.loads(Path(old_path).read_text(encoding="utf-8"))
+    new = json.loads(Path(new_path).read_text(encoding="utf-8"))
+    print(f"旧报告：{Path(old_path).name}")
+    print(f"新报告：{Path(new_path).name}")
+    print(f"单次通过率：{old.get('single_rate')}% → {new.get('single_rate')}%")
+    print(f"pass^{RUNS}：{old.get('pass_k')} → {new.get('pass_k')}")
+
+    regression = False
+    for cid in sorted(set(old["cases"]) | set(new["cases"])):
+        o, n = old["cases"].get(cid), new["cases"].get(cid)
+        if o is None or n is None:
+            print(f"  [变化] {cid}：{'新增用例' if o is None else '用例消失'}")
+            continue
+        if o["pass_k"] and not n["pass_k"]:
+            regression = True
+            print(f"  [退化] {cid}：{o['passed']}/{o['rounds']} → "
+                  f"{n['passed']}/{n['rounds']}，失败断言 {n['failed_checks']}")
+        elif n["failed_checks"] != o["failed_checks"]:
+            print(f"  [断言变化] {cid}：{o['failed_checks']} → {n['failed_checks']}")
+        else:
+            print(f"  [无退化] {cid}")
+
+    if old.get("checks_registered") != new.get("checks_registered"):
+        print("  ⚠️ 两次注册的断言集不同，通过率不能直接比（删断言也能伪装成涨分）")
+    o_rate, n_rate = old.get("single_rate"), new.get("single_rate")
+    if o_rate is not None and n_rate is not None and n_rate < o_rate:
+        regression = True
+    print("结论：" + ("发现退化" if regression else "无退化（改了能证明没改坏）"))
+    return not regression
+
+
+# ==================== 报告 → 证据回放 ====================
+
+def evidence_report(path):
+    """按报告把每条用例每一轮的轨迹找出来，打印证据索引并当场校验。
+
+    🔴 这是「有 trace（可回放）」这条卖点的落地点：以前报告只写 PASS/FAIL，
+    面试官问「这个 PASS 凭什么」只能重跑一次；现在报告直接指到轨迹文件，
+    且当场校验它存在、非空、有终止事件。证据被删、被手改，立刻暴露。
+
+    四条 fail-closed（缺证据判失败）判据：
+      ① 报告里没有任何一轮证据       —— 空列表不许算「完整」
+      ② 某轮没有 evidence 字段       —— 旧报告不假装能回放
+      ③ 轨迹文件不存在 / 为空 / 缺终止事件，而报告判 PASS
+      ④ 报告判 PASS，但断言明细里仍有 FAIL（或一条断言都没有）
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    trace_dir = Path(__file__).resolve().parent.parent / "trace"
+    print("=" * 66)
+    print(f"证据回放：{Path(path).name}")
+    print("=" * 66)
+
+    total = 0
+    broken = []
+    for cid, info in sorted(data.get("cases", {}).items()):
+        rounds = info.get("evidence")
+        if rounds is None:
+            print(f"  [旧报告] {cid} —— 无 evidence 字段，无法回放（请重跑一次生成新报告）")
+            broken.append(f"{cid}:旧报告")
+            continue
+        for item in rounds:
+            total += 1
+            i = item.get("round")
+            verdict = item.get("ok")
+            rel = item.get("trace")
+            p = trace_dir / Path(rel).name if rel else None
+            exists = bool(rel and p and p.is_file())
+            events = checks.read_events(p) if exists else []
+            seq = [e.get("type") for e in events]
+            terminal = [t for t in seq if t in ("final", "max_turns")]
+            enough = exists and bool(events) and bool(terminal)
+
+            detail = item.get("checks") or []
+            if not exists:
+                broken.append(f"{cid}#{i}:轨迹文件不存在")
+            elif verdict and not enough:
+                broken.append(f"{cid}#{i}:PASS 但轨迹为空或缺终止事件")
+            if verdict and not detail:
+                broken.append(f"{cid}#{i}:PASS 但没有任何断言明细")
+            elif verdict and any(not c.get("ok") for c in detail):
+                broken.append(f"{cid}#{i}:报告判 PASS 但断言明细里有 FAIL")
+
+            state = "OK" if exists and (enough or not verdict) else "证据不足"
+            print(f"  [{state}] {cid} 第 {i} 轮 {'PASS' if verdict else 'FAIL'} "
+                  f"→ {rel or '无轨迹'} ｜ {len(events)} 个事件："
+                  f"{' → '.join(seq) or '空'}")
+
+    if total == 0:
+        broken.append("报告里没有任何一轮证据（空列表不许算完整）")
+    print(f"共 {total} 轮；证据链完整 = {not broken}")
+    if broken:
+        print("断点：" + "；".join(broken))
+    return not broken
+
+
+# ==================== 断言层自检（不需要模型 / 网络 / key） ====================
+
+_SELFCHECK_CASE = {
+    "id": "selfcheck",
+    "expect": {
+        "stop": "final",
+        "tools_must": ["read_file", "write_file"],
+        "tools_forbidden": ["run"],
+        "receipt": True,
+        "skill_injected": "file-copy",
+    },
+}
+
+
+def _good_events():
+    """一份「正常闭环」的轨迹事件，纯内存构造，不碰磁盘。"""
+    return [
+        {"type": "skill", "turn": 0, "name": "file-copy"},
+        {"type": "tool_call", "turn": 1, "name": "read_file"},
+        {"type": "action_card", "turn": 2, "card_id": "card-x", "name": "write_file",
+         "fp": "abc123456789", "approved": True, "approved_by": "eval:auto"},
+        {"type": "tool_call", "turn": 2, "name": "write_file"},
+        {"type": "receipt", "turn": 2, "card_id": "card-x", "fp": "abc123456789",
+         "status": "executed", "after_bytes": 74, "md5": "deadbeef0000",
+         "approved_by": "eval:auto"},
+        {"type": "final", "turn": 3},
+    ]
+
+
+def _mutate(fn):
+    events = _good_events()
+    fn(events)
+    return events
+
+
+def selfcheck():
+    """故意改坏八处，断言必须各自报警。全报警才返回 True。
+
+    这是「反向验证」内建进项目：以前它躺在 _scratch 脚本里，
+    别人 git clone 下来根本看不见；现在一条命令就能证明断言不是摆设。
+    """
+    print("=" * 66)
+    print("评测中台自检 · 故意改坏，断言必须报警（不报警 = 假测试）")
+    print(f"当前注册断言器：{[c['name'] for c in checks.list_checks()]}")
+    print("=" * 66)
+
+    row = {"sandbox": None, "answer": "已完成", "trace": None}
+    scenarios = [
+        ("0 正常样本（必须全绿）", _good_events(), set(), True),
+        ("1 抽掉回执", _mutate(lambda e: e.remove(e[4])),
+         {"receipt:exists", "receipt:source", "receipt:fingerprint",
+          "receipt:executed", "receipt:approved_by"}, False),
+        ("2 回执指纹被改", _mutate(lambda e: e[4].update(fp="ffffffffffff")),
+         {"receipt:fingerprint"}, False),
+        ("3 自动批准冒充人批准", _mutate(lambda e: e[4].update(approved_by="human")),
+         {"receipt:approved_by"}, False),
+        ("4 落盘字节数不是实测值", _mutate(lambda e: e[4].update(after_bytes=None)),
+         {"receipt:executed"}, False),
+        ("5 调了禁用工具 run", _mutate(
+            lambda e: e.insert(3, {"type": "tool_call", "turn": 2, "name": "run"})),
+         {"tools:forbidden"}, False),
+        ("6 工具调用顺序反了", _mutate(lambda e: e[1].update(name="write_file")),
+         {"tools:must"}, False),
+        ("7 没注入 Skill", _mutate(lambda e: e.remove(e[0])),
+         {"skill:injected"}, False),
+        ("8 轨迹整个空掉", [], {"trace"}, False),
+    ]
+
+    all_ok = True
+    for label, events, must_fail, baseline in scenarios:
+        results = checks.run_all(row, _SELFCHECK_CASE, events=events)
+        failed = {n for n, ok, _ in results if not ok}
+        ok = (not failed) if baseline else must_fail.issubset(failed)
+        all_ok = all_ok and ok
+        print(f"  [{'PASS' if ok else 'FAIL'}] {label} —— 报警 {sorted(failed) or '无'}")
+
+    # 单独防 fail-open：轨迹空时，禁调工具不许被判成「一次都没调 = 通过」
+    empty = checks.run_all(row, _SELFCHECK_CASE, events=[])
+    names = [n for n, _, _ in empty]
+    leak = "tools:forbidden" in names
+    print(f"  [{'FAIL' if leak else 'PASS'}] 9 轨迹空时禁调工具不许静默通过"
+          f" —— 产出断言 {names}")
+    all_ok = all_ok and not leak
+
+    print("结论：" + ("自检通过，断言确实在拦" if all_ok else "自检失败，存在假测试"))
+    return all_ok
+
+
 if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="mini-pi 评测中台")
+    p.add_argument("--selfcheck", action="store_true",
+                   help="断言层反向验证；不联网、不需要 key")
+    p.add_argument("--compare", nargs=2, metavar=("OLD", "NEW"),
+                   help="对比两份已落盘的报告，发现退化则非零退出")
+    p.add_argument("--evidence", metavar="REPORT",
+                   help="按报告回放证据：打印每轮轨迹路径与事件序列，缺证据则非零退出")
+    p.add_argument("--out", default=None, help="报告输出路径（缺省自动写 reports/）")
+    args = p.parse_args()
+
+    if args.selfcheck:
+        sys.exit(0 if selfcheck() else 1)
+    if args.compare:
+        sys.exit(0 if compare_reports(*args.compare) else 1)
+    if args.evidence:
+        sys.exit(0 if evidence_report(args.evidence) else 1)
+
     # 顺序是硬约束：每轮 run_one → check → destroy，三轮各自走一遍。
     groups = []
     cases = dataset.list_cases()
@@ -313,3 +466,5 @@ if __name__ == "__main__":
         print(f"\n=== {case.get('id')}：跑 {RUNS} 次 ===")
         groups.append((case.get("id"), run_rounds(case, RUNS)))
     report(groups)
+    if groups:
+        print(f"报告已落盘：{save_report(groups, args.out)}")

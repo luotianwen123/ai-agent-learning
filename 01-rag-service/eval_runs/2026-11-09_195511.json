@@ -1,0 +1,90 @@
+{
+  "时间": "2026-11-09 19:55:09",
+  "语料": {
+    "篇数": 78,
+    "块数": 4234
+  },
+  "检索": {
+    "实现": "chroma",
+    "K_retrieve": 10,
+    "K_report": 5
+  },
+  "指标": {
+    "doc_recall@5": 1.0,
+    "chunk_hit@5": 1.0,
+    "mrr": 0.542,
+    "avg_rank_hit": 2.4
+  },
+  "每题": [
+    {
+      "id": "Q1",
+      "q": "RAG 和微调该怎么选？",
+      "rank": 3,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q2",
+      "q": "为什么说切分是RAG的命门？",
+      "rank": 1,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q3",
+      "q": "为什么余弦相似度必须除以范数？",
+      "rank": 3,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q4",
+      "q": "为什么overlap不能设得很大？",
+      "rank": 1,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q5",
+      "q": "分块器有几道校验？分别是什么？",
+      "rank": 3,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q6",
+      "q": "语料加载层有几道哨兵？分别防什么？",
+      "rank": 1,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q7",
+      "q": "prev[-0:]为什么会出错？",
+      "rank": 2,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q8",
+      "q": "删掉Observation那条tool消息，为什么第一反应是API报错？",
+      "rank": 4,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q9",
+      "q": "done字段为什么要用not？它怎么控制循环？",
+      "rank": 3,
+      "doc_hit@5": true,
+      "hit@5": true
+    },
+    {
+      "id": "Q10",
+      "q": "checkpointer存的是最新一张快照还是全部？",
+      "rank": 3,
+      "doc_hit@5": true,
+      "hit@5": true
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{"type": "skill", "turn": 0, "name": "file-copy", "ts": "20:04:45"}
+{"type": "action_card", "turn": 1, "card_id": "card-fee5a123", "name": "run", "fp": "df5d135eddc2", "approved": true, "approved_by": "eval:auto", "ts": "20:04:45"}
+{"type": "tool_call", "turn": 1, "name": "run", "args": "{\"command\": \"copy /y a.txt b.txt\"}", "md5": "c04a4cb2d0fa", "len": 42, "result": "$ copy /y a.txt b.txt\n已复制         1 个文件。\r\n", "truncated": false, "ts": "20:04:45"}
+{"type": "receipt", "turn": 1, "card_id": "card-fee5a123", "fp": "df5d135eddc2", "name": "run", "status": "executed", "approved_by": "eval:auto", "before_bytes": null, "after_bytes": 74, "md5": "c04a4cb2d0fa", "len": 42, "ts": "20:04:45"}
+{"type": "final", "turn": 2, "chars": 15, "ts": "20:04:45"}
